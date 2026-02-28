@@ -30,9 +30,11 @@ die() { echo "[-] $*" >&2; exit 1; }
 
 check_tools() {
     local missing=()
-    for cmd in autoconf automake libtool pkg-config cmake git; do
+    for cmd in autoconf automake pkg-config cmake git; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
+    command -v glibtoolize &>/dev/null || command -v libtoolize &>/dev/null \
+        || missing+=("libtool(ize)")
     (( ${#missing[@]} == 0 )) || die "Missing: ${missing[*]} — brew install ${missing[*]}"
 }
 
