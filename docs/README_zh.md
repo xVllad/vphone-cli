@@ -76,7 +76,7 @@
 brew install ideviceinstaller wget gnu-tar openssl@3 ldid-procursus sshpass keystone autoconf automake pkg-config libtool cmake
 ```
 
-**Submodules** —— 本仓库使用 git submodule 存储资源文件。克隆时请使用：
+**Submodules** —— 本仓库通过 git submodule 管理资源、Swift 依赖以及 `scripts/repos/` 下的工具链源码。克隆时请使用：
 
 ```bash
 git clone --recurse-submodules https://github.com/Lakr233/vphone-cli.git
@@ -87,12 +87,14 @@ git clone --recurse-submodules https://github.com/Lakr233/vphone-cli.git
 ```bash
 make setup_machine            # 完全自动化完成"首次启动"流程（包含 restore/ramdisk/CFW）
 # 选项：NONE_INTERACTIVE=1 SUDO_PASSWORD=...
+# DEV=1 开发变体（+ TXM 权限/调试绕过）
+# JB=1 越狱变体（dev + 完整安全绕过）
 ```
 
 ## 手动设置
 
 ```bash
-make setup_tools              # 安装 brew 依赖、构建 trustcache + libimobiledevice、创建 Python 虚拟环境
+make setup_tools              # 安装 brew 依赖、从 submodule 源码构建 trustcache + insert_dylib + libimobiledevice、创建 Python 虚拟环境
 make build                    # 构建并签名 vphone-cli
 make vm_new                   # 创建 VM 目录及清单文件（config.plist）
 # 选项：CPU=8 MEMORY=8192 DISK_SIZE=64
@@ -196,7 +198,7 @@ make boot
 在另一个终端中启动 iproxy 隧道：
 
 ```bash
-iproxy 22222 22222   # SSH（dropbear）
+iproxy 2222 22222    # SSH（dropbear）
 iproxy 2222 22       # SSH（越狱版：在 Sileo 中安装 openssh-server 后）
 iproxy 5901 5901     # VNC
 iproxy 5910 5910     # RPC
@@ -208,6 +210,21 @@ iproxy 5910 5910     # RPC
 - **SSH（常规版/开发版）：** `ssh -p 2222 root@127.0.0.1`（密码：`alpine`）
 - **VNC：** `vnc://127.0.0.1:5901`
 - [**RPC：**](http://github.com/doronz88/rpc-project) `rpcclient -p 5910 127.0.0.1`
+
+## VM 备份与切换
+
+保存并切换多个 VM 环境（例如不同的 iOS 构建版本或固件变体）。备份存储在 `vm.backups/` 下，使用 `rsync --sparse` 高效处理稀疏磁盘镜像。
+
+```bash
+make vm_backup NAME=26.1-clean    # 保存当前 VM
+rm -rf vm && make vm_new          # 清空后从新构建开始
+# ... fw_prepare, fw_patch, restore, cfw_install, boot
+make vm_backup NAME=26.3-jb       # 保存新的 VM
+make vm_list                      # 列出所有备份
+make vm_switch NAME=26.1-clean    # 在不同备份之间切换
+```
+
+> **注意：** 备份/切换/恢复前请先停止 VM。
 
 ## 常见问题（FAQ）
 
