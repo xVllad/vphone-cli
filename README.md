@@ -85,7 +85,7 @@ Boot into Recovery (long press power button), open Terminal, then choose one set
 brew install ideviceinstaller wget gnu-tar openssl@3 ldid-procursus sshpass keystone autoconf automake pkg-config libtool cmake
 ```
 
-**Submodules** — this repo uses a git submodule for resource archives. Clone with:
+**Submodules** — this repo uses git submodules for resources, vendored Swift deps, and toolchain sources under `scripts/repos/`. Clone with:
 
 ```bash
 git clone --recurse-submodules https://github.com/Lakr233/vphone-cli.git
@@ -95,13 +95,15 @@ git clone --recurse-submodules https://github.com/Lakr233/vphone-cli.git
 
 ```bash
 make setup_machine            # full automation through "First Boot" (includes restore/ramdisk/CFW)
-# options: NONE_INTERACTIVE=1 SUDO_PASSWORD=...
+# options: NONE_INTERACTIVE=1 SUDO_PASSWORD=... 
+# DEV=1 for dev variant (+ TXM entitlement/debug bypasses)
+# JB=1 for jailbreak variant (+ full security bypass)
 ```
 
 ## Manual Setup
 
 ```bash
-make setup_tools              # install brew deps, build trustcache, clone insert_dylib, build libimobiledevice, create Python venv
+make setup_tools              # install brew deps, build trustcache + insert_dylib + libimobiledevice from submodule sources, create Python venv
 make build                    # build + sign vphone-cli
 make vm_new                   # create VM directory with manifest (config.plist)
 # options: CPU=8 MEMORY=8192 DISK_SIZE=64
@@ -205,7 +207,7 @@ make boot
 In a separate terminal, start iproxy tunnels:
 
 ```bash
-iproxy 22222 22222   # SSH (dropbear)
+iproxy 2222 22222    # SSH (dropbear)
 iproxy 2222 22       # SSH (JB: if you install openssh-server from Sileo)
 iproxy 5901 5901     # VNC
 iproxy 5910 5910     # RPC
@@ -217,6 +219,21 @@ Connect via:
 - **SSH (Regular/Dev):** `ssh -p 2222 root@127.0.0.1` (password: `alpine`)
 - **VNC:** `vnc://127.0.0.1:5901`
 - [**RPC:**](http://github.com/doronz88/rpc-project) `rpcclient -p 5910 127.0.0.1`
+
+## VM Backup & Switch
+
+Save and switch between multiple VM environments (e.g. different iOS builds or firmware variants). Backups are stored in `vm.backups/` using `rsync --sparse` for efficient sparse disk handling.
+
+```bash
+make vm_backup NAME=26.1-clean    # save current VM
+rm -rf vm && make vm_new          # start fresh for a different build
+# ... fw_prepare, fw_patch, restore, cfw_install, boot
+make vm_backup NAME=26.3-jb       # save the new one too
+make vm_list                      # list all saved backups
+make vm_switch NAME=26.1-clean    # swap between them
+```
+
+> **Note:** Always stop the VM before backup/switch/restore.
 
 ## FAQ
 
