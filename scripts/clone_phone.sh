@@ -113,7 +113,7 @@ if ! cp --version 2>/dev/null | grep -q GNU; then
   touch "$_apfs_src"
   if cp -c "$_apfs_src" "$_apfs_dst" 2>/dev/null; then
     CP_FILE_FLAGS="-ac"
-    CP_DIR_FLAGS="-arc"
+    CP_DIR_FLAGS="-ac"
     APFS_CLONE=1
   fi
   rm -f "$_apfs_src" "$_apfs_dst" 2>/dev/null || true
