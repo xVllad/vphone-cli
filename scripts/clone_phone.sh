@@ -61,7 +61,7 @@ while [[ $# -gt 0 ]]; do
     --count)
       [[ $# -ge 2 ]] || die "--count requires a value"
       COUNT="$2"
-      [[ "$COUNT" == <1-> ]] || die "Invalid --count: ${COUNT} (must be a positive integer)"
+      [[ "$COUNT" =~ ^[1-9][0-9]*$ ]] || die "Invalid --count: ${COUNT} (must be a positive integer)"
       shift 2
       ;;
     -h|--help)
