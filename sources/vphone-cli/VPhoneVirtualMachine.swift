@@ -13,20 +13,30 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
     /// Synthetic battery source for runtime charge/connectivity updates.
     private var batterySource: AnyObject?
 
+    public enum Variant: String, Sendable {
+        case less
+        case regular
+        case dev
+        case jb
+        case exp
+    }
+    
     struct Options {
         var configURL: URL
-        var romURL: URL
+        var romURL: URL?
         var nvramURL: URL
         var diskURL: URL
         var cpuCount: Int = 8
         var memorySize: UInt64 = 8 * 1024 * 1024 * 1024
         var sepStorageURL: URL
-        var sepRomURL: URL
+        var sepRomURL: URL?
         var screenWidth: Int = 1290
         var screenHeight: Int = 2796
         var screenPPI: Int = 460
         var screenScale: Double = 3.0
         var kernelDebugPort: Int?
+        var variant: Variant
+        var noVphoned: Bool
     }
 
     private struct DeviceIdentity {
@@ -134,7 +144,9 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
 
         // --- Boot loader with custom ROM ---
         let bootloader = VZMacOSBootLoader()
-        Dynamic(bootloader)._setROMURL(options.romURL)
+        if let romURL = options.romURL {
+            Dynamic(bootloader)._setROMURL(romURL)
+        }
 
         // --- VM Configuration ---
         let config = VZVirtualMachineConfiguration()
@@ -205,17 +217,31 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
             config.serialPorts = [serialPort]
             print("[vphone] PL011 serial port attached (interactive)")
         }
+        
+        if let obj1 = Dynamic._VZMacVideoToolboxDeviceConfiguration().asObject,
+           let obj2 = Dynamic._VZMacNeuralEngineDeviceConfiguration().asObject,
+           let obj3 = Dynamic._VZMacScalerAcceleratorDeviceConfiguration().asObject
+        {
+            Dynamic(config)._setAcceleratorDevices([obj1,obj2,obj3])
+            print("[vphone] Accelerator devices configured")
+        }
 
         // Multi-touch (USB touch screen)
         if let obj = Dynamic._VZUSBTouchScreenConfiguration().asObject {
             Dynamic(config)._setMultiTouchDevices([obj])
             print("[vphone] USB touch screen configured")
         }
+        
+        let obj = VZVirtioEntropyDeviceConfiguration()
+        config.entropyDevices = [obj]
+        print("[vphone] Entropy device configured")
 
         config.keyboards = [VZUSBKeyboardConfiguration()]
 
-        // Vsock (host <-> guest control channel, no IP/TCP involved)
-        config.socketDevices = [VZVirtioSocketDeviceConfiguration()]
+        if !options.noVphoned {
+            // Vsock (host <-> guest control channel, no IP/TCP involved)
+            config.socketDevices = [VZVirtioSocketDeviceConfiguration()]
+        }
 
         // Power source (synthetic battery - guest sees full charge, charging)
         let source = Dynamic._VZMacSyntheticBatterySource()
@@ -250,7 +276,9 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
 
         // Coprocessors
         let sepConfig = Dynamic._VZSEPCoprocessorConfiguration(storageURL: options.sepStorageURL)
-        sepConfig.setRomBinaryURL(options.sepRomURL)
+        if let sepRomURL = options.sepRomURL {
+            sepConfig.setRomBinaryURL(sepRomURL)
+        }
         sepConfig.setDebugStub(Dynamic._VZGDBDebugStubConfiguration().asObject)
         if let sepObj = sepConfig.asObject {
             Dynamic(config)._setCoprocessors([sepObj])

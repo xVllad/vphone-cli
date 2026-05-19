@@ -8,6 +8,9 @@
 //   .regular — base patchers only
 //   .dev     — TXMDevPatcher instead of TXMPatcher
 //   .jb      — TXMDevPatcher + IBootJBPatcher (iBSS) + KernelJBPatcher
+//   .exp     — JB + experimental: KernelEXPPatcher (hv_vmm rename) +
+//              DeviceTreePatcher identity properties (D47AP/iPhone17,3).
+//              Other variants are NOT affected by experimental patches.
 
 import Darwin
 import Foundation
@@ -24,9 +27,11 @@ public final class FirmwarePipeline {
     // MARK: - Variant
 
     public enum Variant: String, Sendable {
+        case less
         case regular
         case dev
         case jb
+        case exp
     }
 
     // MARK: - Firmware Loader (pluggable IM4P support)
@@ -73,6 +78,8 @@ public final class FirmwarePipeline {
     let vmDirectory: URL
     let variant: Variant
     let verbose: Bool
+    let noBinpack: Bool
+    let noVphoned: Bool
     let loader: any FirmwareLoader
 
     // MARK: - Init
@@ -81,11 +88,15 @@ public final class FirmwarePipeline {
         vmDirectory: URL,
         variant: Variant = .regular,
         verbose: Bool = true,
+        noBinpack: Bool = false,
+        noVphoned: Bool = false,
         loader: (any FirmwareLoader)? = nil
     ) {
         self.vmDirectory = vmDirectory
         self.variant = variant
         self.verbose = verbose
+        self.noBinpack = noBinpack
+        self.noVphoned = noVphoned
         self.loader = loader ?? ContainerFirmwareLoader()
     }
 
@@ -136,6 +147,10 @@ public final class FirmwarePipeline {
                 componentRecords.append(contentsOf: records)
                 if let deviceTreePatcher = patcher as? DeviceTreePatcher {
                     currentData = deviceTreePatcher.patchedData
+                } else if let filesystemPatcher = patcher as? CryptexFilesystemPatcher {
+                    currentData = filesystemPatcher.patchedData
+                } else if let manifestPatcher = patcher as? ManifestHashPatcher {
+                    currentData = manifestPatcher.patchedData
                 } else {
                     for record in records {
                         let range = record.fileOffset ..< record.fileOffset + record.patchedBytes.count
@@ -163,24 +178,39 @@ public final class FirmwarePipeline {
     func buildComponentList() -> [ComponentDescriptor] {
         var components: [ComponentDescriptor] = []
 
-        // 1. AVPBooter — always present, lives in VM root
+        // 1. AVPBooter — always present, lives in VM root.
+        //    Patched for every non-less variant (regular/dev/jb/exp).
         components.append(ComponentDescriptor(
             name: "AVPBooter",
             inRestoreDir: false,
             searchPatterns: ["AVPBooter*.bin"],
-            patcherFactories: [{ data, verbose in
-                AVPBooterPatcher(data: data, verbose: verbose)
-            }]
+            patcherFactories: {
+                if variant != .less {
+                    return [
+                        { data, verbose in
+                            AVPBooterPatcher(data: data, verbose: verbose)
+                        },
+                    ]
+                }
+                return []
+            }()
         ))
 
-        // 2. iBSS — JB variant runs the base iBSS patcher, then the nonce-skip extension.
+        // 2. iBSS — JB and EXP variants run the base iBSS patcher, then the nonce-skip extension.
         components.append(ComponentDescriptor(
             name: "iBSS",
             inRestoreDir: true,
             searchPatterns: ["Firmware/dfu/iBSS.vresearch101.RELEASE.im4p"],
             patcherFactories: {
-                if variant == .jb {
-                    return [
+                return switch variant {
+                case .less:
+                    []
+                case .regular, .dev:
+                    [{ data, verbose in
+                        IBootPatcher(data: data, mode: .ibss, verbose: verbose)
+                    }]
+                case .jb, .exp:
+                    [
                         { data, verbose in
                             IBootPatcher(data: data, mode: .ibss, verbose: verbose)
                         },
@@ -189,13 +219,10 @@ public final class FirmwarePipeline {
                         },
                     ]
                 }
-                return [{ data, verbose in
-                    IBootPatcher(data: data, mode: .ibss, verbose: verbose)
-                }]
             }()
         ))
 
-        // 3. iBEC — same for all variants
+        // 3. iBEC - Not required by the less variant, still added for the serial logs.
         components.append(ComponentDescriptor(
             name: "iBEC",
             inRestoreDir: true,
@@ -205,7 +232,7 @@ public final class FirmwarePipeline {
             }]
         ))
 
-        // 4. LLB — same for all variants
+        // 4. LLB - Not required by the less variant, still added for the serial logs.
         components.append(ComponentDescriptor(
             name: "LLB",
             inRestoreDir: true,
@@ -215,49 +242,119 @@ public final class FirmwarePipeline {
             }]
         ))
 
-        // 5. TXM — dev/jb variants use TXMDevPatcher (adds entitlements, debugger, dev-mode)
+        // 5. TXM — dev/jb/exp variants use TXMDevPatcher (adds entitlements, debugger, dev-mode)
         components.append(ComponentDescriptor(
             name: "TXM",
             inRestoreDir: true,
             searchPatterns: ["Firmware/txm.iphoneos.research.im4p"],
-            patcherFactories: [{ [variant] data, verbose in
-                if variant == .dev || variant == .jb {
-                    return TXMDevPatcher(data: data, verbose: verbose)
+            patcherFactories: {
+                return switch variant {
+                case .less:
+                    []
+                case .regular:
+                    [{ data, verbose in
+                        TXMPatcher(data: data, verbose: verbose)
+                    }]
+                case .dev, .jb, .exp:
+                    [{ data, verbose in
+                        TXMDevPatcher(data: data, verbose: verbose)
+                    }]
                 }
-                return TXMPatcher(data: data, verbose: verbose)
-            }]
+            }()
         ))
 
         // 6. Kernel — JB variant runs base kernel patches first, then JB extensions.
+        //    EXP variant runs base + JB + experimental extensions (hv_vmm rename).
         components.append(ComponentDescriptor(
             name: "kernelcache",
             inRestoreDir: true,
             searchPatterns: ["kernelcache.research.vphone600"],
             patcherFactories: {
-                if variant == .jb {
-                    return [
+                return switch variant {
+                case .less:
+                    []
+                case .regular:
+                    [{ data, verbose in
+                        KernelPatcher(data: data, verbose: verbose, isDev: false)
+                    }]
+                case .dev:
+                    [{ data, verbose in
+                        KernelPatcher(data: data, verbose: verbose, isDev: true)
+                    }]
+                case .jb:
+                    [
                         { data, verbose in
-                            KernelPatcher(data: data, verbose: verbose)
+                            KernelPatcher(data: data, verbose: verbose, isDev: false)
                         },
                         { data, verbose in
                             KernelJBPatcher(data: data, verbose: verbose)
                         },
                     ]
+                case .exp:
+                    [
+                        { data, verbose in
+                            KernelPatcher(data: data, verbose: verbose, isDev: false)
+                        },
+                        { data, verbose in
+                            KernelJBPatcher(data: data, verbose: verbose)
+                        },
+                        { data, verbose in
+                            KernelEXPPatcher(data: data, verbose: verbose)
+                        },
+                    ]
                 }
-                return [{ data, verbose in
-                    KernelPatcher(data: data, verbose: verbose)
-                }]
             }()
         ))
 
-        // 7. DeviceTree — same for all variants
+        // 7. DeviceTree — base property patches for every variant. EXP additionally
+        //    applies the 8 identity-rewrite properties (Tier 1b + 1c) that flip the
+        //    device's userland-visible identity toward D47AP / iPhone17,3.
+        let dtIncludeIdentity = variant == .exp
         components.append(ComponentDescriptor(
             name: "DeviceTree",
             inRestoreDir: true,
             searchPatterns: ["Firmware/all_flash/DeviceTree.vphone600ap.im4p"],
             patcherFactories: [{ data, verbose in
-                DeviceTreePatcher(data: data, verbose: verbose)
+                DeviceTreePatcher(
+                    data: data,
+                    verbose: verbose,
+                    includeIdentityPatches: dtIncludeIdentity
+                )
             }]
+        ))
+        
+        // 8. Filesystem
+        components.append(ComponentDescriptor(
+            name: "Filesystem",
+            inRestoreDir: true,
+            searchPatterns: ["BuildManifest.plist"],
+            patcherFactories: {
+                return switch variant {
+                case .less:
+                    [{ data, verbose in
+                        CryptexFilesystemPatcher(buildManiest: data, restoreDir: try! self.findRestoreDirectory(), verbose: verbose, noBinpack: self.noBinpack, noVphoned: self.noVphoned)
+                    }]
+                case .regular, .dev, .jb, .exp:
+                    []
+                }
+            }()
+        ))
+
+        // 9. Firmware Manifest - Only required when excluding the img4 signature patches.
+        components.append(ComponentDescriptor(
+            name: "Manifest",
+            inRestoreDir: true,
+            searchPatterns: ["BuildManifest.plist"],
+            patcherFactories: {
+                return switch variant {
+                case .less:
+                    [{ data, verbose in
+                        ManifestHashPatcher(data: data, restoreDir: try? self.findRestoreDirectory(), verbose: verbose)
+                    }]
+                case .regular, .dev, .jb, .exp:
+                    []
+                }
+            }()
         ))
 
         return components
@@ -374,6 +471,7 @@ public final class FirmwarePipeline {
         if let txm = patcher as? TXMPatcher { return txm.buffer.data }
         if let kp = patcher as? KernelPatcher { return kp.buffer.data }
         if let kjb = patcher as? KernelJBPatcher { return kjb.buffer.data }
+        if let kexp = patcher as? KernelEXPPatcher { return kexp.buffer.data }
         if let dt = patcher as? DeviceTreePatcher { return dt.patchedData }
 
         // Fallback: apply records manually to a copy of the original data.

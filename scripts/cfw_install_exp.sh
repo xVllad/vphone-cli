@@ -1,15 +1,31 @@
 #!/bin/zsh
-# cfw_install_jb.sh — Install base CFW + JB extensions on vphone via SSH ramdisk.
+# cfw_install_exp.sh — Install base CFW + JB extensions + EXP experimental
+# patches on vphone via SSH ramdisk.
 #
-# Runs the base CFW installer first (phases 1-7), then applies JB-specific
-# modifications: launchd jetsam patch, dylib injection, procursus bootstrap,
-# and BaseBin hook deployment.
+# Runs the base CFW installer first (phases 1-7), the JB-specific
+# modifications (launchd jetsam patch, dylib injection, procursus bootstrap,
+# BaseBin hook deployment, JB-1..JB-5), and additionally the experimental
+# phases — labeled `EXP-JB-N` to make their EXP-only scope obvious:
+#   - Pre-step      : byte-5 mangle of kern.hv_vmm_present in DSC dylibs
+#                     (paired with KernelEXPPatcher's kernel-side rename).
+#   - EXP-JB-3.5    : surgical 2-insn patch of watchdogd's hv_vmm cache +
+#                     slot re-attest of the standalone Mach-O.
+#   - EXP-JB-6      : post-restore DT identity rewrite (root model /
+#                     target-type / compatible[0]) inside
+#                     /mnt5/.../devicetree.img4.
+#   - EXP-JB-7      : optional ProductBuildVersion rewrite in
+#                     SystemVersion.plist (gated on the SPOOF_BUILD env var).
+#
+# Stages JB-1..JB-5 remain genuine jailbreak phases (inherited from the JB
+# pipeline). Stages prefixed EXP-JB-* are EXP-exclusive — they do NOT run
+# when the JB or DEV install scripts are used. JB and DEV remain on their
+# pre-experimental baseline.
 #
 # Prerequisites (in addition to cfw_install.sh requirements):
 #   - cfw_jb_input/ or resources/cfw_jb_input.tar.zst present
 #   - zstd (for bootstrap decompression)
 #
-# Usage: make cfw_install_jb
+# Usage: make cfw_install_exp
 set -euo pipefail
 
 # ── Restore caller's PATH — Nix /etc/zshenv resets PATH on zsh startup ─
@@ -33,8 +49,66 @@ PYTHON3="$(_resolve_python3)"
 # ════════════════════════════════════════════════════════════════
 # Step 1: Run base CFW install (skip halt — we continue with JB phases)
 # ════════════════════════════════════════════════════════════════
-echo "[*] cfw_install_jb.sh — Installing CFW + JB extensions..."
+echo "[*] cfw_install_exp.sh — Installing CFW + JB extensions + EXP experimental patches..."
 echo ""
+
+# ────────────────────────────────────────────────────────────────────
+# Pre-step: patch hv_vmm_present user-mode consumers in the SystemOS
+# Cryptex's DSC chunks BEFORE running cfw_install.sh.
+#
+# cfw_install.sh decrypts the SystemOS Cryptex AEA into
+# $TEMP_DIR/CryptexSystemOS.dmg and reuses it on subsequent runs. We
+# pre-create that decrypted DMG here, mount it, patch the DSC chunks
+# in place, unmount, and let cfw_install.sh pick up the cached
+# (already-patched) DMG. cfw_install.sh itself is unmodified — this
+# is the EXP variant's device-like user-mode patching, kept out of
+# the JB install path so JB remains unaffected.
+# ────────────────────────────────────────────────────────────────────
+VM_DIR_ABS="$(cd "${VM_DIR:-.}" && pwd)"
+JB_TEMP_DIR="$VM_DIR_ABS/.cfw_temp"
+JB_SYSOS_DMG="$JB_TEMP_DIR/CryptexSystemOS.dmg"
+JB_MNT_SYSOS="$JB_TEMP_DIR/mnt_sysos_hv_vmm"
+mkdir -p "$JB_TEMP_DIR"
+
+# Find the restore directory (same logic as cfw_install.sh)
+JB_RESTORE_DIR=""
+for d in "$VM_DIR_ABS"/iPhone*_Restore; do
+    [[ -d "$d" ]] && { JB_RESTORE_DIR="$d"; break; }
+done
+
+if [[ -z "$JB_RESTORE_DIR" ]]; then
+    echo "[!] hv_vmm DSC patch: no restore directory found, skipping"
+elif [[ ! -f "$JB_SYSOS_DMG" ]]; then
+    # Not yet decrypted — decrypt to the cache location cfw_install.sh expects.
+    echo "[*] hv_vmm DSC patch: decrypting SystemOS into cache..."
+    JB_CRYPTEX_SYSOS=$("$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" cryptex-paths "$JB_RESTORE_DIR/iPhone-BuildManifest.plist" | head -1)
+    JB_AEA_KEY=$(ipsw fw aea --key "$JB_RESTORE_DIR/$JB_CRYPTEX_SYSOS")
+    aea decrypt -i "$JB_RESTORE_DIR/$JB_CRYPTEX_SYSOS" -o "$JB_SYSOS_DMG" -key-value "$JB_AEA_KEY"
+fi
+
+if [[ -f "$JB_SYSOS_DMG" ]]; then
+    # Mount, patch chunks, unmount. Idempotent: re-running on an already
+    # patched DMG is a no-op (patcher detects already-patched form).
+    echo "[*] hv_vmm DSC patch: mounting cached SystemOS DMG..."
+    mkdir -p "$JB_MNT_SYSOS"
+    sudo hdiutil detach "$JB_MNT_SYSOS" -force 2>/dev/null || true
+    sudo hdiutil attach -mountpoint "$JB_MNT_SYSOS" "$JB_SYSOS_DMG" -nobrowse -owners off
+
+    JB_DSC_CHUNKS_DIR="$JB_MNT_SYSOS/System/Library/Caches/com.apple.dyld"
+    if [[ -d "$JB_DSC_CHUNKS_DIR" ]]; then
+        echo "[*] hv_vmm DSC patch: patching chunks under $JB_DSC_CHUNKS_DIR..."
+        "$SCRIPT_DIR/patch_hv_vmm_userland.sh" dsc "$JB_DSC_CHUNKS_DIR"
+        echo "[+] hv_vmm DSC patch: chunks patched"
+    else
+        echo "[-] hv_vmm DSC patch: $JB_DSC_CHUNKS_DIR not found, skipping"
+    fi
+
+    sudo hdiutil detach "$JB_MNT_SYSOS" -force
+fi
+
+# Now run the regular CFW install. It will see the cached (patched)
+# CryptexSystemOS.dmg and use it as-is, so the patched DSC chunks land
+# in /mnt1/System/Cryptexes/OS on the device.
 CFW_SKIP_HALT=1 zsh "$SCRIPT_DIR/cfw_install.sh" "$VM_DIR"
 
 # ════════════════════════════════════════════════════════════════
@@ -283,6 +357,40 @@ ssh_cmd "/bin/chmod 0755 /mnt1/usr/libexec/debugserver"
 echo "  [+] debugserver entitlements patched"
 
 
+# ═══════════ EXP-JB-3.5 PATCH watchdogd hv_vmm_present cache ══
+#
+# Background: the kernel-side OID rename (KernelEXPPatchHvVmmRename)
+# makes sysctlbyname("kern.hv_vmm_present", ...) return ENOENT on this
+# image. watchdogd caches that answer at startup and uses it to decide
+# whether to look for the IOWatchdog kext. The unpatched flow takes
+# the "not on a VM" branch on ENOENT, fails to find the kext (it
+# doesn't exist on the VM), calls _os_crash -> brk #1, and launchd's
+# `_PanicOnCrash` knob in com.apple.watchdogd.plist escalates the
+# resulting SIGTRAP to a kernel panic.
+#
+# Patch shape: two-instruction surgical edit at every site in
+# watchdogd that has the canonical
+#   adrp/add(kern.hv_vmm_present) -> bl _sysctlbyname -> cbnz w0,skip
+#       -> cset wN,ne -> strb wN,[global]
+# shape. The edit forces the cached byte to 1 regardless of the
+# sysctl result, so the downstream branch at +0x58e0 takes watchdogd's
+# pre-existing "detected virtual machine environment" clean-exit path.
+# The patcher also recomputes the affected CodeDirectory slot hashes
+# (cfw_macho_codesign) so TXM still accepts the modified pages on
+# demand-page-in. We deliberately do NOT re-sign with ldid — the
+# Apple-issued code-signing identifier ("com.apple.watchdogd") must be
+# preserved for launchd boot-task identity validation.
+echo ""
+echo "[EXP-JB-3.5] Patching watchdogd hv_vmm_present cache..."
+
+scp_from "/mnt1/usr/libexec/watchdogd" "$TEMP_DIR/watchdogd"
+"$SCRIPT_DIR/patch_hv_vmm_userland.sh" watchdogd "$TEMP_DIR/watchdogd"
+scp_to "$TEMP_DIR/watchdogd" "/mnt1/usr/libexec/watchdogd"
+ssh_cmd "/bin/chmod 0755 /mnt1/usr/libexec/watchdogd"
+
+echo "  [+] watchdogd patched"
+
+
 # ═══════════ JB-4 INSTALL PROCURSUS BOOTSTRAP ══════════════════
 echo ""
 echo "[JB-4] Installing procursus bootstrap..."
@@ -405,6 +513,98 @@ with open(sys.argv[1], 'wb') as f:
     echo "  [+] com.vphone.jb-setup.plist injected into launchd.plist"
 fi
 
+# ═══════════ EXP-JB-6 POST-RESTORE DT IDENTITY REWRITE ════════
+#
+# Apply the three restore-unsafe DT property edits that broke earlier
+# attempts when applied at fw_patch time:
+#   root/model        iPhone99,11 -> iPhone17,3
+#   root/target-type  VPHONE600   -> D47
+#   root/compatible   reordered to [D47AP, VPHONE600AP, AppleVirtualPlatformARM]
+#
+# These are restore-time-fatal (restored_external / iBoot's restore mode
+# cross-checks model+target-type against the BuildManifest's signed
+# identity) but NOT boot-time-fatal — the existing iBSS/iBEC/LLB
+# image4_validate_property_callback bypass patches accept any IM4P
+# contents on subsequent boots.
+#
+# /mnt5 is still mounted at this point in the install flow (the umount
+# happens in the CLEANUP block below). We scp the live devicetree.img4
+# down, patch it on the host, scp it back. Next boot, iBoot loads the
+# modified DT, kernel populates machine_info from the new values, and
+# sysctl hw.machine / hw.product / hw.model flip to iPhone17,3 / D47 /
+# (whatever IOPlatformExpert resolves from compatible[0]=D47AP).
+echo ""
+echo "[EXP-JB-6] Post-restore DT identity rewrite..."
+
+if [[ -z "$BOOT_HASH" ]]; then
+    BOOT_HASH="$(get_boot_manifest_hash)"
+fi
+if [[ -z "$BOOT_HASH" ]]; then
+    echo "  [-] BOOT_HASH not discoverable, skipping EXP-JB-6"
+else
+    JB6_DT_REMOTE="/mnt5/$BOOT_HASH/usr/standalone/firmware/devicetree.img4"
+    JB6_DT_LOCAL="$TEMP_DIR/devicetree.img4"
+    if ssh_cmd "test -f '$JB6_DT_REMOTE'" 2>/dev/null; then
+        scp_from "$JB6_DT_REMOTE" "$JB6_DT_LOCAL"
+        "$PYTHON3" "$SCRIPT_DIR/patchers/cfw_patch_post_restore_dt.py" "$JB6_DT_LOCAL"
+        scp_to "$JB6_DT_LOCAL" "$JB6_DT_REMOTE"
+        ssh_cmd "/usr/sbin/chown 0:0 $JB6_DT_REMOTE"
+        ssh_cmd "/bin/chmod 0644 $JB6_DT_REMOTE"
+        echo "  [+] devicetree.img4 rewritten in place"
+    else
+        echo "  [-] $JB6_DT_REMOTE not found, skipping EXP-JB-6"
+    fi
+fi
+
+# ═══════════ EXP-JB-7 BUILD-VERSION REWRITE (SystemVersion.plist) ══
+#
+# OPT-IN. Only runs when SPOOF_BUILD is set in the environment (e.g.
+# `make setup_machine JB=1 SPOOF_BUILD=23F77` or `make cfw_install_jb
+# SPOOF_BUILD=23F77`). When SPOOF_BUILD is unset/empty the step is
+# skipped entirely and the build identifier stays at whatever the IPSW
+# shipped.
+#
+# What it does (when enabled): flips ProductBuildVersion in the two
+# SystemVersion.plist files iOS reads for "Build" display and
+# MGCopyAnswer("BuildVersion"):
+#   /System/Library/CoreServices/SystemVersion.plist                       (rootfs)
+#   /private/preboot/Cryptexes/OS/System/Library/CoreServices/SystemVersion.plist (Cryptex)
+#
+# Both are plain plist files (no Apple signature on individual plists),
+# so no image4 / cdHash / TXM concerns. Both volumes are writable at
+# install time:
+#   /mnt1 (rootfs)  — writable before the install-time seal is established
+#   /mnt5 (preboot) — apfs writable
+#
+# After this, Settings -> About -> Build, MG BuildVersion key, and every
+# framework that reads SystemVersion.plist see the new identifier.
+# `sysctl kern.osversion` still reports the kernel image's own build
+# (e.g. 23B78 from the PCC vphone600/vresearch101 kernel) — that comes
+# from a kernel global populated at boot from boot args, not from this
+# plist.
+if [[ -n "${SPOOF_BUILD:-}" ]]; then
+    echo ""
+    echo "[EXP-JB-7] Rewriting ProductBuildVersion to $SPOOF_BUILD in SystemVersion plists..."
+
+    for jb7_remote in \
+        "/mnt1/System/Library/CoreServices/SystemVersion.plist" \
+        "/mnt5/Cryptexes/OS/System/Library/CoreServices/SystemVersion.plist"
+    do
+        if ssh_cmd "test -f '$jb7_remote'" 2>/dev/null; then
+            jb7_local="$TEMP_DIR/$(echo "$jb7_remote" | tr '/' '_').plist"
+            scp_from "$jb7_remote" "$jb7_local"
+            "$PYTHON3" "$SCRIPT_DIR/patchers/cfw_patch_build_version.py" \
+                "$jb7_local" "$SPOOF_BUILD"
+            scp_to "$jb7_local" "$jb7_remote"
+        else
+            echo "  [-] $jb7_remote not found, skipping"
+        fi
+    done
+else
+    echo ""
+    echo "[EXP-JB-7] Skipped — SPOOF_BUILD not set (pass SPOOF_BUILD=<id> to enable)"
+fi
+
 # ═══════════ CLEANUP ═════════════════════════════════════════
 echo ""
 echo "[*] Unmounting device filesystems..."
@@ -417,7 +617,7 @@ rm -f "$TEMP_DIR/launchd" \
     "$TEMP_DIR/bootstrap-iphoneos-arm64.tar"
 
 echo ""
-echo "[+] CFW + JB installation complete!"
+echo "[+] CFW + JB + EXP installation complete!"
 echo "    Reboot the device for changes to take effect."
 echo "    After boot, SSH will be available on port 22222 (password: alpine)"
 

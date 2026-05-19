@@ -52,11 +52,18 @@ IPROXY_RESOLVE_REASON=""
 BOOT_ANALYSIS_TIMEOUT="${BOOT_ANALYSIS_TIMEOUT:-300}"
 BOOT_PROMPT_FALLBACK_TIMEOUT="${BOOT_PROMPT_FALLBACK_TIMEOUT:-60}"
 BOOT_BASH_PROMPT_REGEX="${BOOT_BASH_PROMPT_REGEX:-bash-[0-9]+(\.[0-9]+)+#}"
-BOOT_PANIC_REGEX="${BOOT_PANIC_REGEX:-panic|kernel panic|panic\\.apple\\.com|stackshot succeeded}"
+BOOT_PANIC_REGEX="${BOOT_PANIC_REGEX:-(^|[^p])(panic|kernel panic|panic\\.apple\\.com|stackshot succeeded)}"
+PMD3_BRIDGE="${PMD3_BRIDGE:-${PROJECT_ROOT}/scripts/pymobiledevice3_bridge.py}"
 NONE_INTERACTIVE_RAW="${NONE_INTERACTIVE:-0}"
 NONE_INTERACTIVE=0
+NO_BINPACK_RAW="${NO_BINPACK:-0}"
+NO_BINPACK=0
+NO_VPHONED_RAW="${NO_VPHONED:-0}"
+NO_VPHONED=0
 JB_MODE=0
 DEV_MODE=0
+EXP_MODE=0
+LESS_MODE=0
 SKIP_PROJECT_SETUP=0
 
 die() {
@@ -67,6 +74,22 @@ die() {
 require_cmd() {
   local cmd="$1"
   command -v "$cmd" >/dev/null 2>&1 || die "Missing required command: $cmd"
+}
+
+find_python_for_pmd3() {
+  local candidate
+  for candidate in \
+    "${PROJECT_ROOT}/.venv/bin/python3" \
+    "$(command -v python3 2>/dev/null || true)"
+  do
+    [[ -n "$candidate" ]] || continue
+    [[ -x "$candidate" ]] || continue
+    if "$candidate" -c "import pymobiledevice3" >/dev/null 2>&1; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
 }
 
 normalize_ecid() {
@@ -124,15 +147,11 @@ load_device_identity() {
 }
 
 list_usbmux_udids() {
-  local idevice_id_bin
-  idevice_id_bin="${PROJECT_ROOT}/.limd/bin/idevice_id"
-
-  if [[ ! -x "$idevice_id_bin" ]]; then
-    idevice_id_bin="$(command -v idevice_id || true)"
-  fi
-  [[ -x "$idevice_id_bin" ]] || return 0
-
-  "$idevice_id_bin" -l 2>/dev/null | tr -d '\r' | sed '/^[[:space:]]*$/d'
+  local pmd3_python
+  pmd3_python="$(find_python_for_pmd3 || true)"
+  [[ -x "$pmd3_python" ]] || die "pymobiledevice3 python runtime not found (run: make setup_tools)"
+  [[ -f "$PMD3_BRIDGE" ]] || die "Missing bridge script: $PMD3_BRIDGE"
+  "$pmd3_python" "$PMD3_BRIDGE" usbmux-list 2>/dev/null | tr -d '\r' | sed '/^[[:space:]]*$/d'
 }
 
 print_usbmux_udids() {
@@ -685,8 +704,8 @@ install_brew_deps() {
   require_cmd brew
 
   local deps=(
-    ideviceinstaller wget gnu-tar openssl@3 ldid-procursus sshpass keystone autoconf automake pkg-config libtool git-lfs
-    python@3.13
+    wget gnu-tar openssl@3 ldid-procursus sshpass keystone git-lfs
+    python@3.13 libusb ipsw
   )
 
   echo "=== Installing Homebrew dependencies ==="
@@ -723,6 +742,19 @@ run_make() {
   make "$@"
 }
 
+run_make_sudo() {
+  local label="$1"
+  shift
+
+  echo ""
+  echo "=== ${label} ==="
+  if [[ -n "${SUDO_PASSWORD:-}" ]]; then
+    sudo -A -E -- make "$@"
+  else
+    sudo -E -- make "$@"
+  fi
+}
+
 start_boot_dfu() {
   mkdir -p "$LOG_DIR"
 
@@ -732,6 +764,10 @@ start_boot_dfu() {
 
   kill_stale_vphone_procs
   check_vm_storage_locks
+
+  # Remove stale prediction file so load_device_identity waits for the fresh
+  # one written by this boot, avoiding an ECID mismatch race.
+  rm -f "${VM_DIR_ABS}/udid-prediction.txt"
 
   : > "$DFU_LOG"
   echo "[*] Starting DFU boot in background..."
@@ -783,20 +819,15 @@ wait_for_post_restore_reboot() {
 }
 
 wait_for_recovery() {
-  local irecovery="${PROJECT_ROOT}/.limd/bin/irecovery"
-  local -a query_args
-  [[ -x "$irecovery" ]] || die "irecovery not found at $irecovery"
-
-  if [[ -n "$DEVICE_ECID" ]]; then
-    query_args=(-i "0x${DEVICE_ECID}")
-  else
-    query_args=()
-  fi
+  local pmd3_python
+  pmd3_python="$(find_python_for_pmd3 || true)"
+  [[ -x "$pmd3_python" ]] || die "pymobiledevice3 python runtime not found (run: make setup_tools)"
+  [[ -f "$PMD3_BRIDGE" ]] || die "Missing bridge script: $PMD3_BRIDGE"
 
   echo "[*] Waiting for recovery/DFU endpoint..."
   local i
   for i in {1..90}; do
-    if "$irecovery" "${query_args[@]}" -q >/dev/null 2>&1; then
+    if "$pmd3_python" "$PMD3_BRIDGE" recovery-probe --ecid "0x${DEVICE_ECID}" --timeout 2 >/dev/null 2>&1; then
       echo "[+] Device endpoint is reachable"
       return
     fi
@@ -809,9 +840,6 @@ wait_for_recovery() {
 }
 
 start_iproxy() {
-  local iproxy_bin
-  iproxy_bin="${PROJECT_ROOT}/.limd/bin/iproxy"
-  [[ -x "$iproxy_bin" ]] || die "iproxy not found at $iproxy_bin (run: make setup_libimobiledevice)"
   [[ -n "$DEVICE_UDID" ]] || die "Device UDID is empty; cannot resolve iproxy target"
 
   choose_ramdisk_ssh_port
@@ -829,8 +857,11 @@ start_iproxy() {
   mkdir -p "$LOG_DIR"
   : > "$IPROXY_LOG"
 
-  echo "[*] Starting iproxy ${RAMDISK_SSH_PORT} -> 22 (target_udid=${IPROXY_TARGET_UDID}, restore_udid=${DEVICE_UDID}, ecid=0x${DEVICE_ECID})..."
-  ("$iproxy_bin" -u "$IPROXY_TARGET_UDID" "$RAMDISK_SSH_PORT" 22 >"$IPROXY_LOG" 2>&1) &
+  local pmd3_python
+  pmd3_python="$(find_python_for_pmd3 || true)"
+  [[ -x "$pmd3_python" ]] || die "pymobiledevice3 python runtime not found (run: make setup_tools)"
+  echo "[*] Starting pymobiledevice3 usbmux forward ${RAMDISK_SSH_PORT} -> 22 (target_udid=${IPROXY_TARGET_UDID}, restore_udid=${DEVICE_UDID}, ecid=0x${DEVICE_ECID})..."
+  ("$pmd3_python" -m pymobiledevice3 usbmux forward --serial "$IPROXY_TARGET_UDID" "$RAMDISK_SSH_PORT" 22 >"$IPROXY_LOG" 2>&1) &
   IPROXY_PID=$!
 
   sleep 1
@@ -932,21 +963,36 @@ parse_args() {
       --dev)
         DEV_MODE=1
         ;;
+      --exp)
+        EXP_MODE=1
+        ;;
+      --less)
+        LESS_MODE=1
+        ;;
       --skip-project-setup)
         SKIP_PROJECT_SETUP=1
         ;;
       -h|--help)
         cat <<'EOF'
-Usage: setup_machine.sh [--jb] [--dev] [--skip-project-setup]
+Usage: setup_machine.sh [--jb] [--dev] [--exp] [--less] [--skip-project-setup]
 
 Options:
   --jb                    Use jailbreak firmware patching + jailbreak CFW install.
   --dev                   Use dev firmware patching + dev CFW install.
+  --exp                   Use experimental firmware patching + EXP CFW install
+                          (JB + kernel hv_vmm rename, DSC byte-5 mangle, watchdogd
+                          surgical patch, DT identity properties, post-restore DT
+                          rewrite, opt-in build-version spoof via SPOOF_BUILD).
+  --less                  Use patchless firmware patching + CFW install.
   --skip-project-setup    Skip setup_tools/build stage.
 
 Environment:
   NONE_INTERACTIVE=1      Auto-continue first-boot prompts + run final boot analysis.
   SUDO_PASSWORD=...       Preload sudo credential via askpass.
+  NO_BINPACK=1            Excludes the SSH, VNC, ... binaries from being installed (patchless-only, currently)
+  NO_VPHONED=1            Excludes vphoned from being installed (patchless-only, currently)
+  SPOOF_BUILD=<id>        (EXP only) Rewrite SystemVersion.plist ProductBuildVersion
+                          to <id> (e.g. 23F77). Omitted/empty -> skipped.
 EOF
         exit 0
         ;;
@@ -962,14 +1008,20 @@ main() {
   if parse_bool "$NONE_INTERACTIVE_RAW"; then
     NONE_INTERACTIVE=1
   fi
+  if parse_bool "$NO_BINPACK_RAW"; then
+    NO_BINPACK=1
+  fi
+  if parse_bool "$NO_VPHONED_RAW"; then
+    NO_VPHONED=1
+  fi
   setup_sudo_noninteractive
 
   local fw_patch_target="fw_patch"
   local cfw_install_target="cfw_install"
   local mode_label="base"
 
-  if [[ "$JB_MODE" -eq 1 && "$DEV_MODE" -eq 1 ]]; then
-    die "--jb and --dev are mutually exclusive"
+  if (( JB_MODE + DEV_MODE + EXP_MODE + LESS_MODE > 1 )); then
+    die "--jb, --dev, --exp, and --less are mutually exclusive"
   fi
 
   if [[ "$JB_MODE" -eq 1 ]]; then
@@ -980,9 +1032,17 @@ main() {
     fw_patch_target="fw_patch_dev"
     cfw_install_target="cfw_install_dev"
     mode_label="dev"
+  elif [[ "$EXP_MODE" -eq 1 ]]; then
+    fw_patch_target="fw_patch_exp"
+    cfw_install_target="cfw_install_exp"
+    mode_label="experimental"
+  elif [[ "$LESS_MODE" -eq 1 ]]; then
+    fw_patch_target="fw_patch_less"
+    cfw_install_target=""
+    mode_label="less"
   fi
 
-  echo "[*] setup_machine mode: ${mode_label}, project_setup=$([[ "$SKIP_PROJECT_SETUP" -eq 1 ]] && echo "skip" || echo "run"), non_interactive=${NONE_INTERACTIVE}"
+  echo "[*] setup_machine mode: ${mode_label}, project_setup=$([[ "$SKIP_PROJECT_SETUP" -eq 1 ]] && echo "skip" || echo "run"), non_interactive=${NONE_INTERACTIVE}, no_binpack=${NO_BINPACK}, no_vphoned=${NO_VPHONED}"
 
   if [[ "$SKIP_PROJECT_SETUP" -eq 1 ]]; then
     echo ""
@@ -993,7 +1053,11 @@ main() {
     install_brew_deps
     ensure_python_linked
 
-    run_make "Project setup" setup_tools
+    if [[ "$LESS_MODE" -eq 1 ]]; then
+      VARIANT=less run_make "Project setup" setup_tools
+    else
+      run_make "Project setup" setup_tools
+    fi
     run_make "Project setup" build
   fi
 
@@ -1003,7 +1067,11 @@ main() {
 
   run_make "Firmware prep" vm_new
   run_make "Firmware prep" fw_prepare
-  run_make "Firmware patch" "$fw_patch_target"
+  if [[ "$LESS_MODE" -eq 0 ]]; then
+    run_make "Firmware patch" "$fw_patch_target"
+  else
+    run_make_sudo "Firmware patch" "$fw_patch_target"
+  fi
 
   echo ""
   echo "=== Restore phase ==="
@@ -1014,52 +1082,57 @@ main() {
   run_make "Restore" restore RESTORE_UDID="$DEVICE_UDID" RESTORE_ECID="0x$DEVICE_ECID"
   wait_for_post_restore_reboot
   stop_boot_dfu
-  echo "[*] Waiting ${POST_KILL_SETTLE_DELAY}s for cleanup before ramdisk stage..."
-  sleep "$POST_KILL_SETTLE_DELAY"
 
-  echo ""
-  echo "=== Ramdisk + CFW phase ==="
-  start_boot_dfu
-  load_device_identity
-  wait_for_recovery
-  run_make "Ramdisk" ramdisk_build RAMDISK_UDID="$DEVICE_UDID"
-  echo "[*] Ramdisk identity context: restore_udid=${DEVICE_UDID} ecid=0x${DEVICE_ECID}"
-  run_make "Ramdisk" ramdisk_send IRECOVERY_ECID="0x$DEVICE_ECID" RAMDISK_UDID="$DEVICE_UDID"
-  start_iproxy
+  if [[ "$LESS_MODE" -eq 0 ]]; then
+    echo "[*] Waiting ${POST_KILL_SETTLE_DELAY}s for cleanup before ramdisk stage..."
+    sleep "$POST_KILL_SETTLE_DELAY"
+  
+    echo ""
+    echo "=== Ramdisk + CFW phase ==="
+    start_boot_dfu
+    load_device_identity
+    wait_for_recovery
+    run_make "Ramdisk" ramdisk_build RAMDISK_UDID="$DEVICE_UDID"
+    echo "[*] Ramdisk identity context: restore_udid=${DEVICE_UDID} ecid=0x${DEVICE_ECID}"
+    run_make "Ramdisk" ramdisk_send IRECOVERY_ECID="0x$DEVICE_ECID" RAMDISK_UDID="$DEVICE_UDID"
+    start_iproxy
 
-  wait_for_ramdisk_ssh
+    wait_for_ramdisk_ssh
 
-  run_make "CFW install" "$cfw_install_target" SSH_PORT="$RAMDISK_SSH_PORT"
-  stop_boot_dfu
-  stop_iproxy
-
-  echo ""
-  echo "=== First boot ==="
-  if [[ "$NONE_INTERACTIVE" -eq 0 ]]; then
-    read -r "?[*] press Enter to start VM, after the VM has finished booting, press Enter again to finish last stage"
-  else
-    echo "[*] NONE_INTERACTIVE=1: auto-starting first boot"
+    run_make "CFW install" "$cfw_install_target" SSH_PORT="$RAMDISK_SSH_PORT"
+    stop_boot_dfu
+    stop_iproxy
   fi
 
-  start_first_boot
+  if [[ "$LESS_MODE" -eq 0 || "$NO_BINPACK" -eq 0 ]]; then
+    echo ""
+    echo "=== First boot ==="
+    if [[ "$NONE_INTERACTIVE" -eq 0 ]]; then
+      read -r "?[*] press Enter to start VM, after the VM has finished booting, press Enter again to finish last stage"
+    else
+      echo "[*] NONE_INTERACTIVE=1: auto-starting first boot"
+    fi
 
-  if [[ "$NONE_INTERACTIVE" -eq 0 ]]; then
-    read -r "?[*] Press Enter once the VM is fully booted"
-  else
-    wait_for_first_boot_prompt_auto
+    start_first_boot
+
+    if [[ "$NONE_INTERACTIVE" -eq 0 ]]; then
+      read -r "?[*] Press Enter once the VM is fully booted"
+    else
+      wait_for_first_boot_prompt_auto
+    fi
+    send_first_boot_commands
+
+    echo "[*] Commands sent. Waiting for VM shutdown..."
+    wait "$BOOT_PID"
+    BOOT_PID=""
+
+    exec {BOOT_FIFO_FD}>&- || true
+    BOOT_FIFO_FD=""
+    rm -f "$BOOT_FIFO" || true
+    BOOT_FIFO=""
   fi
-  send_first_boot_commands
 
-  echo "[*] Commands sent. Waiting for VM shutdown..."
-  wait "$BOOT_PID"
-  BOOT_PID=""
-
-  exec {BOOT_FIFO_FD}>&- || true
-  BOOT_FIFO_FD=""
-  rm -f "$BOOT_FIFO" || true
-  BOOT_FIFO=""
-
-  if [[ "$JB_MODE" -eq 1 ]]; then
+  if [[ "$JB_MODE" -eq 1 || "$EXP_MODE" -eq 1 ]]; then
     echo ""
     echo "=== JB Finalize ==="
     echo "[*] JB finalization will run automatically on first normal boot"
@@ -1072,7 +1145,11 @@ main() {
   echo "Setup completed."
 
   echo "=== Boot analysis ==="
-  run_boot_analysis
+  if [[ "$LESS_MODE" -eq 0 ]]; then
+    run_boot_analysis
+  else
+    run_make "Start VM" boot_less
+  fi
 }
 
 main "$@"

@@ -17,15 +17,19 @@
 
 ## 固件变体
 
-提供三种补丁变体，安全绕过级别逐步递增：
+提供五种补丁变体，安全绕过级别逐步递增：
 
-| 变体       |   启动链   | 自定义固件 | Make 目标                          |
-| ---------- | :--------: | :--------: | ---------------------------------- |
-| **常规版** | 41 个补丁  | 10 个阶段  | `fw_patch` + `cfw_install`         |
-| **开发版** | 52 个补丁  | 12 个阶段  | `fw_patch_dev` + `cfw_install_dev` |
-| **越狱版** | 112 个补丁 | 14 个阶段  | `fw_patch_jb` + `cfw_install_jb`   |
+| 变体           | 启动链           | 自定义固件 | Make 目标                                   |
+| -------------- | :--------------: | :--------: | ------------------------------------------- |
+| **Patchless**  | 3 个补丁         | 2 个阶段   | `fw_patch_less` + `boot_less`              |
+| **常规版**     | 41 个补丁        | 10 个阶段  | `fw_patch` + `cfw_install`                  |
+| **开发版**     | 52 个补丁        | 12 个阶段  | `fw_patch_dev` + `cfw_install_dev`          |
+| **越狱版**     | 112 个补丁       | 14 个阶段  | `fw_patch_jb` + `cfw_install_jb`            |
+| **实验版**     | 越狱 + EXP 专属  | 越狱 + EXP | `fw_patch_exp` + `cfw_install_exp`          |
 
 > 越狱最终配置（符号链接、Sileo、apt、TrollStore）通过 `/cores/vphone_jb_setup.sh` LaunchDaemon 在首次启动时自动运行。查看进度：`/var/log/vphone_jb_setup.log`。
+
+> **实验版（EXP）** 是越狱版的超集，额外运行研究分支中的实验性补丁：内核 `hv_vmm_present` sysctl 重命名 + 内核内部调用者改写（`KernelEXPPatcher`）、带登录黑名单的 DSC 字节 5 改写 + slot 重新认证、watchdogd 精准 2 条指令补丁（EXP-JB-3.5）、固件补丁阶段的 8 项 DeviceTree 身份属性、还原后 DT 身份重写（EXP-JB-6）、以及通过 `SPOOF_BUILD=<id>` 可选启用的 `SystemVersion.plist` `ProductBuildVersion` 改写（EXP-JB-7）。其他变体不受影响。
 
 详见 [research/0_binary_patch_comparison.md](../research/0_binary_patch_comparison.md) 了解各组件的详细分项对比。
 
@@ -75,10 +79,15 @@
   sudo amfree --path [PATH_TO_VPHONE_DIR]
   ```
 
+  在本仓库中，可以运行 `make amfidont_allow_vphone` 一次性配置
+  `amfidont` 所需的编码路径与 CDHash 允许项。
+
+> Patchless 变体要求使用方式 1，或带 `-S` 参数的 amfidont（`sudo amfidont -S --path [PATH_TO_VPHONE_DIR]`）。
+
 **安装依赖：**
 
 ```bash
-brew install aria2 ideviceinstaller wget gnu-tar openssl@3 ldid-procursus sshpass keystone autoconf automake pkg-config libtool cmake
+brew install aria2 wget gnu-tar openssl@3 ldid-procursus sshpass keystone libusb ipsw zstd
 ```
 
 `scripts/fw_prepare.sh` 会优先使用 `aria2c` 进行更快的多连接下载，必要时再回退到 `curl` 或 `wget`。
@@ -94,22 +103,37 @@ git clone --recurse-submodules https://github.com/Lakr233/vphone-cli.git
 ```bash
 make setup_machine            # 完全自动化完成"首次启动"流程（包含 restore/ramdisk/CFW）
 # 选项：NONE_INTERACTIVE=1 SUDO_PASSWORD=...
+# LESS=1 patchless 变体（- AMFI、SSV、Img4、TXM 绕过）
 # DEV=1 开发变体（+ TXM 权限/调试绕过）
 # JB=1 越狱变体（dev + 完整安全绕过）
+# EXP=1 实验变体（越狱 + 研究补丁：hv_vmm 重命名、DT 身份、还原后重写）
+# SPOOF_BUILD=<id> （仅 EXP）将 SystemVersion.plist 的 ProductBuildVersion 改写为 <id>，例如 23F77
 ```
 
 ## 手动设置
 
 ```bash
-make setup_tools              # 安装 brew 依赖（含 aria2c）、从 submodule 源码构建 trustcache + insert_dylib + libimobiledevice、创建 Python 虚拟环境
+make setup_tools              # 安装 brew 依赖，构建 trustcache + insert_dylib，创建 Python 虚拟环境（含 pymobiledevice3/aria2c）
 make build                    # 构建并签名 vphone-cli
 make vm_new                   # 创建 VM 目录及清单文件（config.plist）
 # 选项：CPU=8 MEMORY=8192 DISK_SIZE=64
 make fw_prepare               # 下载 IPSWs，提取、合并、生成 manifest
 make fw_patch                 # 修补启动链（常规变体）
+# 或：sudo make fw_patch_less # patchless 变体（- AMFI、SSV、Img4、TXM 绕过）
 # 或：make fw_patch_dev       # 开发变体（+ TXM 权限/调试绕过）
 # 或：make fw_patch_jb        # 越狱变体（dev + 完整安全绕过）
+# 或：make fw_patch_exp       # 实验变体（越狱 + 研究补丁栈）
 ```
+
+### 清理
+
+```bash
+make clean                    # 仅删除构建/工具链产物
+make clean CLEAN_VM=1         # 确认后同时删除 vm/
+make clean CLEAN_IPSW=1       # 确认后同时删除 ipsws/
+```
+
+默认清理不会删除 `vm/` 或 `ipsws/`。
 
 ### VM 配置
 
@@ -137,7 +161,9 @@ make boot_dfu                 # 以 DFU 模式启动 VM（保持运行）
 ```bash
 # 终端 2
 make restore_get_shsh         # 获取 SHSH blob
-make restore                  # 通过 idevicerestore 刷写固件
+make restore                  # 通过 pymobiledevice3 restore 后端刷写固件
+# 或：make restore_offline    # 离线恢复（就地解密 AEA 镜像，并使用缓存的 .shsh blob）
+                              # 首次运行需要联网以完成 AEA 解密
 ```
 
 ## 安装自定义固件
@@ -155,17 +181,19 @@ sudo make ramdisk_build       # 构建签名的 SSH ramdisk
 make ramdisk_send             # 发送到设备
 ```
 
-当 ramdisk 运行后（输出中应显示 `Running server`），打开**第三个终端**运行 iproxy 隧道，然后在终端 2 安装 CFW：
+当 ramdisk 运行后（输出中应显示 `Running server`），打开**第三个终端**运行 usbmux 隧道，然后在终端 2 安装 CFW：
 
 ```bash
 # 终端 3 —— 保持运行
-iproxy 2222 22
+python3 -m pymobiledevice3 usbmux forward 2222 22
 ```
 
 ```bash
 # 终端 2
 make cfw_install
 # 或：make cfw_install_jb        # 越狱变体
+# 或：make cfw_install_exp       # 实验变体（越狱 + 研究补丁栈）
+# 或：SPOOF_BUILD=23F77 make cfw_install_exp   # 同时改写 ProductBuildVersion
 ```
 
 ## 首次启动
@@ -202,13 +230,13 @@ shutdown -h now
 make boot
 ```
 
-在另一个终端中启动 iproxy 隧道：
+在另一个终端中启动 usbmux 转发隧道：
 
 ```bash
-iproxy 2222 22222    # SSH（dropbear）
-iproxy 2222 22       # SSH（越狱版：在 Sileo 中安装 openssh-server 后）
-iproxy 5901 5901     # VNC
-iproxy 5910 5910     # RPC
+python3 -m pymobiledevice3 usbmux forward 2222 22222    # SSH（dropbear）
+python3 -m pymobiledevice3 usbmux forward 2222 22       # SSH（越狱版：在 Sileo 中安装 openssh-server 后）
+python3 -m pymobiledevice3 usbmux forward 5901 5901     # VNC
+python3 -m pymobiledevice3 usbmux forward 5910 5910     # RPC
 ```
 
 连接方式：
@@ -249,6 +277,11 @@ AMFI/调试限制未正确绕过。选择以下任一方式：
 
 - **方式 2（仅禁用调试限制）：**
   在恢复模式中使用 `csrutil enable --without debug`（不完全禁用 SIP），然后安装/加载 [`amfidont`](https://github.com/zqxwce/amfidont) 或 [`amfree`](https://github.com/retX0/amfree)，保持 AMFI 其他功能不变。
+  在本仓库中，也可通过 `make amfidont_allow_vphone` 自动写入 `amfidont` 所需的编码路径与 CDHash 允许配置。
+
+**问：`make boot` / `make boot_dfu` 启动后报错 `VZErrorDomain Code=2 "Virtualization is not available on this hardware."`。**
+
+这是因为宿主机本身运行在 Apple 虚拟机中，无法再进行嵌套 Virtualization.framework 来启动 guest。请在非嵌套的 macOS 15+ 主机上运行。可用 `make boot_host_preflight` 检查，若显示 `Model Name: Apple Virtual Machine 1` 和 `kern.hv_vmm_present=1` 即为该情况。当前版本会在此类宿主机上通过 `boot_binary_check` 在启动前快速失败。
 
 **问：系统应用（App Store、信息等）无法下载或安装。**
 
@@ -282,6 +315,15 @@ make fw_patch
 ```
 
 我们的补丁是通过二进制分析（binary analysis）而非静态偏移（static offsets）应用的，因此更新的版本应该也能正常工作。如果出现问题，可以寻求 AI 的帮助。
+
+**问：使用 `restore_offline` 后卡在设置界面。**
+
+设备在设置过程中会尝试连接 Apple，如果你使用了 `restore_offline`，很可能当前没有联网。
+你可以将设备设为 supervised，以绕过大部分设置界面：
+
+```bash
+python3 -m pymobiledevice3 profile supervise vphone
+```
 
 ## 致谢
 
