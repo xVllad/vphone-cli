@@ -15,7 +15,7 @@ VENV_DIR="${PROJECT_ROOT}/.venv"
 REQUIREMENTS="${PROJECT_ROOT}/requirements.txt"
 
 # Use system Python3
-PYTHON="$(command -v python3)"
+PYTHON="$(readlink -f "$(which python3)")"
 if [[ -z "${PYTHON}" ]]; then
     echo "Error: python3 not found in PATH"
     exit 1
@@ -73,9 +73,11 @@ python3 -c "
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
 from keystone import Ks, KS_ARCH_ARM64, KS_MODE_LITTLE_ENDIAN
 from pyimg4 import IM4P
+import pymobiledevice3
 print('  capstone  OK')
 print('  keystone  OK')
 print('  pyimg4    OK')
+print('  pmd3      OK')
 "
 
 echo ""

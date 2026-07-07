@@ -43,12 +43,18 @@ struct VPhoneBootCLI: ParsableCommand {
 
     @Option(help: "Path to signed vphoned binary for guest auto-update")
     var vphonedBin: String = ".vphoned.signed"
+    
+    @Option(help: "Firmware variant to execute.")
+    var variant: PatchFirmwareCLI.VariantOption = .regular
 
     @Option(
-        help: "Automatically install the given IPA/TIPA after the guest control channel connects.",
+        help: "Automatically install the given IPA/TIPA after the guest control channel connects. Unavailable with --dfu.",
         transform: URL.init(fileURLWithPath:)
     )
     var installIPA: URL?
+    
+    @Flag(name: .customLong("no-vphoned"), help: "Exclude vphoned usage (patchless-only).")
+    var noVphoned: Bool = false
 
     /// DFU mode runs headless (no GUI).
     var noGraphics: Bool {
@@ -57,6 +63,26 @@ struct VPhoneBootCLI: ParsableCommand {
 
     var installPackageURL: URL? {
         installIPA?.standardizedFileURL
+    }
+
+    mutating func validate() throws {
+        if dfu, let packageURL = installPackageURL {
+            throw ValidationError(
+                "`--install-ipa` is unavailable with `--dfu` because DFU mode does not start the guest control channel: \(packageURL.path)"
+            )
+        }
+
+        guard let packageURL = installPackageURL else { return }
+
+        guard FileManager.default.fileExists(atPath: packageURL.path) else {
+            throw ValidationError("`--install-ipa` file does not exist: \(packageURL.path)")
+        }
+
+        guard VPhoneInstallPackage.isSupportedFile(packageURL) else {
+            throw ValidationError(
+                "`--install-ipa` only supports .ipa or .tipa packages: \(packageURL.lastPathComponent)"
+            )
+        }
     }
 
     /// Resolve final options by merging manifest values.
@@ -68,18 +94,20 @@ struct VPhoneBootCLI: ParsableCommand {
 
         return VPhoneVirtualMachine.Options(
             configURL: config,
-            romURL: manifest.resolve(path: manifest.romImages.avpBooter, in: vmDir),
+            romURL: manifest.romImages != nil ? manifest.resolve(path: manifest.romImages!.avpBooter, in: vmDir) : nil,
             nvramURL: manifest.resolve(path: manifest.nvramStorage, in: vmDir),
             diskURL: manifest.resolve(path: manifest.diskImage, in: vmDir),
             cpuCount: Int(manifest.cpuCount),
             memorySize: manifest.memorySize,
             sepStorageURL: manifest.resolve(path: manifest.sepStorage, in: vmDir),
-            sepRomURL: manifest.resolve(path: manifest.romImages.avpSEPBooter, in: vmDir),
+            sepRomURL: manifest.romImages != nil ? manifest.resolve(path: manifest.romImages!.avpSEPBooter, in: vmDir) : nil,
             screenWidth: manifest.screenConfig.width,
             screenHeight: manifest.screenConfig.height,
             screenPPI: manifest.screenConfig.pixelsPerInch,
             screenScale: manifest.screenConfig.scale,
-            kernelDebugPort: kernelDebugPort
+            kernelDebugPort: kernelDebugPort,
+            variant: variant.virtualMachineVariant,
+            noVphoned: self.noVphoned
         )
     }
 
@@ -88,15 +116,29 @@ struct VPhoneBootCLI: ParsableCommand {
 
 struct PatchFirmwareCLI: ParsableCommand {
     enum VariantOption: String, CaseIterable, ExpressibleByArgument {
+        case less
         case regular
         case dev
         case jb
+        case exp
 
         var pipelineVariant: FirmwarePipeline.Variant {
             switch self {
+            case .less: .less
             case .regular: .regular
             case .dev: .dev
             case .jb: .jb
+            case .exp: .exp
+            }
+        }
+
+        var virtualMachineVariant: VPhoneVirtualMachine.Variant {
+            switch self {
+            case .less: .less
+            case .regular: .regular
+            case .dev: .dev
+            case .jb: .jb
+            case .exp: .exp
             }
         }
     }
@@ -124,12 +166,20 @@ struct PatchFirmwareCLI: ParsableCommand {
 
     @Flag(name: .customLong("quiet"), help: "Suppress per-component progress output.")
     var quiet: Bool = false
+    
+    @Flag(name: .customLong("no-binpack"), help: "Exclude the SSH, VNC, ... binaries from being installed (patchless-only).")
+    var noBinpack: Bool = false
+
+    @Flag(name: .customLong("no-vphoned"), help: "Exclude vphoned from being installed (patchless-only).")
+    var noVphoned: Bool = false
 
     mutating func run() throws {
         let pipeline = FirmwarePipeline(
             vmDirectory: vmDirectory,
             variant: variant.pipelineVariant,
-            verbose: !quiet
+            verbose: !quiet,
+            noBinpack: noBinpack,
+            noVphoned: noVphoned
         )
         let records = try pipeline.patchAll()
 
@@ -149,6 +199,12 @@ struct PatchComponentCLI: ParsableCommand {
     enum ComponentOption: String, CaseIterable, ExpressibleByArgument {
         case txm
         case kernelBase = "kernel-base"
+        // TESTING/DIAGNOSTICS ONLY — not part of any production flow.
+        // Production JB patching runs through `patch-firmware --variant jb`; this
+        // standalone option exists so `tests/test_jb_kernel_patches.sh` can run the
+        // JB kernel layer over a single kernelcache and dump records via --records-out.
+        // (txm / kernel-base, by contrast, are standalone single-component patchers.)
+        case kernelJB = "kernel-jb"
     }
 
     static let configuration = CommandConfiguration(
@@ -176,10 +232,17 @@ struct PatchComponentCLI: ParsableCommand {
     @Flag(name: .customLong("quiet"), help: "Suppress per-patch progress output.")
     var quiet: Bool = false
 
+    @Option(
+        name: .customLong("records-out"),
+        help: "Optional path to write emitted PatchRecord JSON (for fast-loop validation)."
+    )
+    var recordsOut: String?
+
     mutating func run() throws {
         let payload = try IM4PHandler.load(contentsOf: input).payload
         let count: Int
         let patchedData: Data
+        var records: [PatchRecord] = []
 
         switch component {
         case .txm:
@@ -191,11 +254,32 @@ struct PatchComponentCLI: ParsableCommand {
             let patcher = KernelPatcher(data: payload, verbose: !quiet)
             count = try patcher.apply()
             patchedData = patcher.buffer.data
+            records = patcher.patches
+
+        case .kernelJB:
+            // Mirrors the pipeline's jb kernel layer. In FirmwarePipeline each kernel
+            // patcher runs on the *original* payload independently, so running
+            // KernelJBPatcher standalone faithfully reproduces JB hook behavior
+            // without the base patcher or the rest of the boot chain.
+            let patcher = KernelJBPatcher(data: payload, verbose: !quiet)
+            count = try patcher.apply()
+            patchedData = patcher.buffer.data
+            records = patcher.patches
         }
 
         let outputDir = output.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
         try patchedData.write(to: output)
+
+        if let recordsOut {
+            let url = URL(fileURLWithPath: recordsOut)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(records).write(to: url)
+            if !quiet {
+                print("[patch-component] wrote \(records.count) patch records to \(url.path)")
+            }
+        }
 
         if !quiet {
             print("[patch-component] applied \(count) patches for \(component.rawValue)")

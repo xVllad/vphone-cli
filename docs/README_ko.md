@@ -8,24 +8,30 @@ PCC 리서치 VM 인프라와 Apple의 Virtualization.framework를 사용하여 
 
 ## 테스트된 환경
 
-| Host          | iPhone                | CloudOS       |
-| ------------- | --------------------- | ------------- |
-| Mac16,12 26.3 | `17,3_26.1_23B85`     | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.3-23D128` |
-| Mac16,12 26.3 | `17,3_26.3.1_23D8133` | `26.3-23D128` |
+| Host          | iPhone                | CloudOS         |
+| ------------- | --------------------- | --------------- |
+| Mac16,12 26.3 | `17,3_26.1_23B85`     | `26.1-23B85`    |
+| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.1-23B85`    |
+| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.3-23D128`   |
+| Mac16,12 26.3 | `17,3_26.3.1_23D8133` | `26.3-23D128`   |
+| Mac16,11 26.2 | `17,3_26.4_23E246`    | `26.4-23E5207q` |
+| Mac16,11 26.2 | `17,3_26.5_23F77`     | `26.4-23E5207q` |
 
 ## 펌웨어 변형
 
-보안 우회 수준이 다른 3가지 패치 변형을 사용할 수 있습니다:
+보안 우회 수준이 다른 5가지 패치 변형을 사용할 수 있습니다:
 
-| 변형     | 부트 체인 |    CFW    | Make 타겟                          |
-| -------- | :-------: | :-------: | ---------------------------------- |
-| **일반** |  41 패치  | 10 페이즈 | `fw_patch` + `cfw_install`         |
-| **개발** |  52 패치  | 12 페이즈 | `fw_patch_dev` + `cfw_install_dev` |
-| **탈옥** | 112 패치  | 14 페이즈 | `fw_patch_jb` + `cfw_install_jb`   |
+| 변형           | 부트 체인         |    CFW     | Make 타겟                                   |
+| -------------- | :---------------: | :--------: | ------------------------------------------- |
+| **Patchless**  |  4 패치           | 2 페이즈   | `fw_patch_less` + `boot_less`             |
+| **일반**       |  42 패치          | 10 페이즈  | `fw_patch` + `cfw_install`                  |
+| **개발**       |  53 패치          | 12 페이즈  | `fw_patch_dev` + `cfw_install_dev`          |
+| **탈옥**       | 113 패치          | 14 페이즈  | `fw_patch_jb` + `cfw_install_jb`            |
+| **실험**       | 탈옥 + EXP 전용   | 탈옥 + EXP | `fw_patch_exp` + `cfw_install_exp`          |
 
 > JB 최종 설정(심볼릭 링크, Sileo, apt, TrollStore)은 `/cores/vphone_jb_setup.sh` LaunchDaemon을 통해 첫 번째 부팅 시 자동으로 실행됩니다. 진행 상황 확인: `/var/log/vphone_jb_setup.log`.
+
+> **실험(EXP)** 변형은 탈옥 변형의 상위 집합으로, 연구 브랜치의 실험적 패치를 추가로 실행합니다: 커널 `hv_vmm_present` sysctl 이름 변경 + 커널 내부 호출자 변조(`KernelEXPPatcher`), 로그인 블랙리스트가 있는 DSC 바이트 5 변조 + 슬롯 재인증, watchdogd 정밀 2개 명령어 패치(EXP-JB-3.5), 펌웨어 패치 단계의 DeviceTree 식별 속성 8개, 복원 후 DT 식별 재작성(EXP-JB-6), 그리고 `SPOOF_BUILD=<id>`를 통한 옵트인 `SystemVersion.plist` `ProductBuildVersion` 재작성(EXP-JB-7). 다른 변형은 의도적으로 영향을 받지 않습니다.
 
 컴포넌트별 상세 분류는 [research/0_binary_patch_comparison.md](../research/0_binary_patch_comparison.md)를 참조하세요.
 
@@ -75,10 +81,15 @@ PCC 리서치 VM 인프라와 Apple의 Virtualization.framework를 사용하여 
   sudo amfree --path [PATH_TO_VPHONE_DIR]
   ```
 
+  이 저장소에서는 `make amfidont_allow_vphone`으로 `amfidont`에 필요한
+  인코딩 경로와 CDHash 허용 설정을 한 번에 적용할 수 있습니다.
+
+> Patchless 변형은 방법 1 또는 `-S` 플래그를 포함한 amfidont(`sudo amfidont -S --path [PATH_TO_VPHONE_DIR]`)가 필요합니다.
+
 **의존성(Dependencies) 설치:**
 
 ```bash
-brew install aria2 ideviceinstaller wget gnu-tar openssl@3 ldid-procursus sshpass keystone autoconf automake pkg-config libtool cmake
+brew install aria2 wget gnu-tar openssl@3 ldid-procursus sshpass keystone libusb ipsw zstd
 ```
 
 `scripts/fw_prepare.sh` 는 더 빠른 다중 연결 다운로드를 위해 `aria2c` 를 우선 사용하고, 필요하면 `curl` 또는 `wget` 으로 폴백합니다.
@@ -92,22 +103,39 @@ git clone --recurse-submodules https://github.com/Lakr233/vphone-cli.git
 ## 빠른 시작
 
 ```bash
-make setup_machine            # "First Boot"까지의 전체 과정 자동화 (복원/Ramdisk/커스텀 펌웨어 포함)
-# 옵션: NONE_INTERACTIVE=1 SUDO_PASSWORD=...
+make setup_machine            # "First Boot"까지의 전체 과정 자동화 (복원/커스텀 펌웨어 포함)
+# 옵션: NON_INTERACTIVE=1 SUDO_PASSWORD=...
+# LESS=1 Patchless 변형 (- AMFI, SSV, Img4, TXM 우회)
+# DEV=1 개발 변형 (+ TXM 권한/디버그 우회)
+# JB=1 탈옥 변형 (dev + 전체 보안 우회)
+# EXP=1 실험 변형 (탈옥 + 연구 패치: hv_vmm 이름 변경, DT 식별, 복원 후 재작성)
+# SPOOF_BUILD=<id> (EXP 전용) SystemVersion.plist의 ProductBuildVersion을 <id>로 재작성, 예: 23F77
 ```
 
 ## 수동 설정
 
 ```bash
-make setup_tools              # brew 의존성 설치(aria2c 포함), submodule 소스에서 trustcache + insert_dylib + libimobiledevice 빌드, Python venv 생성
+make setup_tools              # brew 의존성 설치, trustcache + insert_dylib 빌드, Python venv 생성(pymobiledevice3/aria2c 포함)
 make build                    # vphone-cli 빌드 및 서명
 make vm_new                   # VM 디렉토리 및 매니페스트(config.plist) 생성
 # 옵션: CPU=8 MEMORY=8192 DISK_SIZE=64
 make fw_prepare               # IPSW 다운로드, 추출, 병합, manifest 생성
 make fw_patch                 # 부트 체인 패치 (일반 변형)
+# 또는: sudo make fw_patch_less # Patchless 변형 (- AMFI, SSV, Img4, TXM 우회)
 # 또는: make fw_patch_dev     # 개발 변형 (+ TXM 권한/디버그 우회)
 # 또는: make fw_patch_jb      # 탈옥 변형 (dev + 전체 보안 우회)
+# 또는: make fw_patch_exp     # 실험 변형 (탈옥 + 연구 패치 스택)
 ```
+
+### 정리
+
+```bash
+make clean                    # 빌드/도구 산출물만 삭제
+make clean CLEAN_VM=1         # 확인 후 vm/ 도 삭제
+make clean CLEAN_IPSW=1       # 확인 후 ipsws/ 도 삭제
+```
+
+기본 clean은 `vm/` 또는 `ipsws/` 를 삭제하지 않습니다.
 
 ### VM 설정
 
@@ -135,40 +163,27 @@ make boot_dfu                 # VM을 DFU 모드로 부팅 (계속 실행 유지
 ```bash
 # 터미널 2
 make restore_get_shsh         # SHSH blob 가져오기
-make restore                  # idevicerestore를 통해 펌웨어 플래싱
+make restore                  # pymobiledevice3 restore 백엔드로 펌웨어 플래싱
+# 또는: make restore_offline    # 오프라인 복원 (AEA 이미지를 제자리에서 복호화하고 캐시된 .shsh blob 사용)
+                              # 최초 1회는 AEA 복호화를 위해 인터넷 연결이 필요합니다
 ```
 
 ## 커스텀 펌웨어 설치
 
-터미널 1의 DFU 부팅을 중단(Ctrl+C)한 다음, 램디스크를 위해 다시 DFU로 부팅합니다:
+복원이 완료되면 터미널 1의 DFU 부팅을 중단(Ctrl+C)하여 VM을 완전히 종료합니다. 설치 프로그램은 VM의 `Disk.img`를 호스트에 마운트하여 모든 CFW 파일을 배치하고 부팅 스냅샷을 오프라인으로 전환합니다(DFU / 램디스크 / SSH 불필요). 따라서 디스크에 대한 독점 액세스가 필요합니다.
 
 ```bash
-# 터미널 1
-make boot_dfu                 # 계속 실행 유지
-```
-
-```bash
-# 터미널 2
-sudo make ramdisk_build       # 서명된 SSH 램디스크 빌드
-make ramdisk_send             # 장치로 전송
-```
-
-램디스크가 실행되면(출력에 `Running server`가 표시됨), **세 번째 터미널**을 열어 iproxy 터널을 시작한 후, 터미널 2에서 커스텀 펌웨어를 설치합니다:
-
-```bash
-# 터미널 3 — 계속 실행 유지
-iproxy 2222 22
-```
-
-```bash
-# 터미널 2
+# 터미널 2 (자동으로 sudo로 재실행됨)
 make cfw_install
+# 또는: make cfw_install_dev       # 개발 변형
 # 또는: make cfw_install_jb        # 탈옥 변형
+# 또는: make cfw_install_exp       # 실험 변형 (탈옥 + 연구 패치 스택)
+# 또는: SPOOF_BUILD=23F77 make cfw_install_exp   # 추가로 ProductBuildVersion 재작성
 ```
 
 ## 첫 부팅
 
-터미널 1의 DFU 부팅을 중단(Ctrl+C)한 후 다음을 실행합니다:
+DFU 부팅을 중단하고 CFW를 설치한 후, VM을 정상 부팅합니다:
 
 ```bash
 make boot
@@ -200,13 +215,13 @@ shutdown -h now
 make boot
 ```
 
-별도의 터미널에서 iproxy 터널을 시작합니다:
+별도의 터미널에서 usbmux 포워딩 터널을 시작합니다:
 
 ```bash
-iproxy 2222 22222    # SSH (dropbear)
-iproxy 2222 22       # SSH (탈옥: Sileo에서 openssh-server를 설치한 경우)
-iproxy 5901 5901     # VNC
-iproxy 5910 5910     # RPC
+python3 -m pymobiledevice3 usbmux forward 2222 22222    # SSH (dropbear)
+python3 -m pymobiledevice3 usbmux forward 2222 22       # SSH (탈옥: Sileo에서 openssh-server를 설치한 경우)
+python3 -m pymobiledevice3 usbmux forward 5901 5901     # VNC
+python3 -m pymobiledevice3 usbmux forward 5910 5910     # RPC
 ```
 
 다음을 통해 연결합니다:
@@ -247,6 +262,11 @@ AMFI/디버그 제한이 올바르게 우회되지 않았습니다. 다음 중 �
 
 - **방법 2 (디버그 제한만 비활성화):**
   복구 모드에서 `csrutil enable --without debug`(완전한 SIP 비활성화 없음)를 사용한 다음, [`amfidont`](https://github.com/zqxwce/amfidont) 또는 [`amfree`](https://github.com/retX0/amfree)를 설치/로드하여 AMFI의 나머지 기능은 활성 상태로 유지합니다.
+  이 저장소에서는 `make amfidont_allow_vphone`으로 `amfidont`에 필요한 인코딩 경로와 CDHash 허용 설정을 자동 적용할 수 있습니다.
+
+**Q: `make boot` / `make boot_dfu` 실행 시 `VZErrorDomain Code=2 "Virtualization is not available on this hardware."`로 실패합니다.**
+
+호스트 자체가 Apple 가상 머신에서 실행 중이기 때문에, 중첩된 Virtualization.framework 게스트 부팅은 지원되지 않습니다. 중첩이 아닌 macOS 15+ 호스트에서 실행하세요. `make boot_host_preflight`에서 `Model Name: Apple Virtual Machine 1` 및 `kern.hv_vmm_present=1`로 이를 확인할 수 있습니다. 현재는 이런 호스트에서 `boot_binary_check`가 VM 시작 전에 빠르게 실패 처리합니다.
 
 **Q: 시스템 앱(App Store, 메시지 등)을 다운로드하거나 설치할 수 없습니다.**
 
@@ -280,6 +300,15 @@ make fw_patch
 ```
 
 저희의 패치는 정적 오프셋이 아닌 바이너리 분석을 통해 적용되므로, 최신 버전에서도 작동할 것입니다. 만약 문제가 발생하면 AI에게 도움을 요청하세요.
+
+**Q: `restore_offline`를 사용했더니 설정 화면에서 진행이 멈췄습니다**
+
+설정 과정에서 Apple 서버에 연결을 시도하는데, `restore_offline`를 사용한 경우 인터넷에 연결되어 있지 않을 가능성이 큽니다.
+기기를 supervised 상태로 만들면 설정 화면의 대부분을 우회할 수 있습니다:
+
+```bash
+python3 -m pymobiledevice3 profile supervise vphone
+```
 
 ## 감사 인사
 

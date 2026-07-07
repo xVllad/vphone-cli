@@ -8,24 +8,30 @@ Boot a virtual iPhone (iOS 26) via Apple's Virtualization.framework using PCC re
 
 ## Tested Environments
 
-| Host          | iPhone                | CloudOS       |
-| ------------- | --------------------- | ------------- |
-| Mac16,12 26.3 | `17,3_26.1_23B85`     | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.3-23D128` |
-| Mac16,12 26.3 | `17,3_26.3.1_23D8133` | `26.3-23D128` |
+| Host          | iPhone                | CloudOS         |
+| ------------- | --------------------- | --------------- |
+| Mac16,12 26.3 | `17,3_26.1_23B85`     | `26.1-23B85`    |
+| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.1-23B85`    |
+| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.3-23D128`   |
+| Mac16,12 26.3 | `17,3_26.3.1_23D8133` | `26.3-23D128`   |
+| Mac16,11 26.2 | `17,3_26.4_23E246`    | `26.4-23E5207q` |
+| Mac16,11 26.2 | `17,3_26.5_23F77`     | `26.4-23E5207q` |
 
 ## Firmware Variants
 
-Three patch variants are available with increasing levels of security bypass:
+Five patch variants are available with increasing levels of security bypass:
 
-| Variant         | Boot Chain  |    CFW    | Make Targets                       |
-| --------------- | :---------: | :-------: | ---------------------------------- |
-| **Regular**     | 41 patches  | 10 phases | `fw_patch` + `cfw_install`         |
-| **Development** | 52 patches  | 12 phases | `fw_patch_dev` + `cfw_install_dev` |
-| **Jailbreak**   | 112 patches | 14 phases | `fw_patch_jb` + `cfw_install_jb`   |
+| Variant          | Boot Chain     |    CFW     | Make Targets                        |
+| ---------------- | :------------: | :--------: | ----------------------------------- |
+| **Patchless**    | 4 patches      | 2 phases   | `fw_patch_less` + `boot_less`       |
+| **Regular**      | 42 patches     | 10 phases  | `fw_patch` + `cfw_install`          |
+| **Development**  | 53 patches     | 12 phases  | `fw_patch_dev` + `cfw_install_dev`  |
+| **Jailbreak**    | 113 patches    | 14 phases  | `fw_patch_jb` + `cfw_install_jb`    |
+| **Experimental** | 141 patches    | 18 phases  | `fw_patch_exp` + `cfw_install_exp`  |
 
 > JB finalization (symlinks, Sileo, apt, TrollStore) runs automatically on first boot via `/cores/vphone_jb_setup.sh` LaunchDaemon. Monitor progress: `/var/log/vphone_jb_setup.log`.
+
+> **Experimental (EXP)** is a JB superset that patches the kernel and DSC to make some Apple services think the device is not a VM, while keeping VM-specific services (graphics passthrough, compute/accel fast paths) working correctly. Other variants are deliberately NOT affected.
 
 See [research/0_binary_patch_comparison.md](./research/0_binary_patch_comparison.md) for the detailed per-component breakdown.
 
@@ -84,13 +90,21 @@ Boot into Recovery (long press power button), open Terminal, then choose one set
   This helper computes the current signed `vphone-cli` CDHash and uses the
   URL-encoded project path form observed by `AMFIPathValidator`.
 
+> The Patchless variant requires either the use of option 1 or amfidont with the `-S` flag (`sudo amfidont -S --path [PATH_TO_VPHONE_DIR]`)
+
 **Install dependencies:**
 
+*You will need both brew dependencies and Git Submodule dependencies.*
+
+1. Brew dependencies:
+
 ```bash
-brew install aria2 ideviceinstaller wget gnu-tar openssl@3 ldid-procursus sshpass keystone autoconf automake pkg-config libtool cmake
+brew install aria2 wget gnu-tar openssl@3 ldid-procursus sshpass keystone libusb ipsw zstd
 ```
 
 `scripts/fw_prepare.sh` prefers `aria2c` for faster multi-connection downloads and falls back to `curl` or `wget` when needed.
+
+2. Git Submodules
 
 **Submodules** — this repo uses git submodules for resources, vendored Swift deps, and toolchain sources under `scripts/repos/`. Clone with:
 
@@ -101,24 +115,39 @@ git clone --recurse-submodules https://github.com/Lakr233/vphone-cli.git
 ## Quick Start
 
 ```bash
-make setup_machine            # full automation through "First Boot" (includes restore/ramdisk/CFW)
-# options: NONE_INTERACTIVE=1 SUDO_PASSWORD=... 
+make setup_machine            # full automation through "First Boot" (includes restore/CFW)
+# options: NON_INTERACTIVE=1 SUDO_PASSWORD=...
+# LESS=1 for patchless variant (- AMFI, SSV, Img4, TXM bypasses) 
 # DEV=1 for dev variant (+ TXM entitlement/debug bypasses)
 # JB=1 for jailbreak variant (+ full security bypass)
+# EXP=1 for experimental variant (JB + research patches: hv_vmm rename, DT identity, post-restore rewrite)
+# SPOOF_BUILD=<id> (EXP only) Rewrite SystemVersion.plist ProductBuildVersion to <id>, e.g. 23F77
 ```
 
 ## Manual Setup
 
 ```bash
-make setup_tools              # install brew deps (including aria2c), build trustcache + insert_dylib + libimobiledevice from submodule sources, create Python venv
+make setup_tools              # install brew deps, build trustcache + insert_dylib, create Python venv (pymobiledevice3, aria2c included)
 make build                    # build + sign vphone-cli
 make vm_new                   # create VM directory with manifest (config.plist)
 # options: CPU=8 MEMORY=8192 DISK_SIZE=64
 make fw_prepare               # download IPSWs, extract, merge, generate manifest
 make fw_patch                 # patch boot chain (regular variant)
+# or: sudo make fw_patch_less # patchless variant (- AMFI, SSV, Img4, TXM bypasses)
 # or: make fw_patch_dev       # dev variant (+ TXM entitlement/debug bypasses)
 # or: make fw_patch_jb        # jailbreak variant (+ full security bypass)
+# or: make fw_patch_exp       # experimental variant (JB + research stack)
 ```
+
+### Cleaning
+
+```bash
+make clean                    # remove build/tooling artifacts only
+make clean CLEAN_VM=1         # also remove vm/ after confirmation
+make clean CLEAN_IPSW=1       # also remove ipsws/ after confirmation
+```
+
+Default clean never removes `vm/` or `ipsws/`.
 
 ### VM Configuration
 
@@ -146,40 +175,30 @@ make boot_dfu                 # boot VM in DFU mode (keep running)
 ```bash
 # terminal 2
 make restore_get_shsh         # fetch SHSH blob
-make restore                  # flash firmware via idevicerestore
+make restore                  # flash firmware via pymobiledevice3 restore backend
+# or: make restore_offline    # offline restore (decrypts AEA images in place, uses cached .shsh blob)
+                              # for the first time should be ran with internet access for AEA decryption
 ```
 
 ## Install Custom Firmware
 
-Stop the DFU boot in terminal 1 (Ctrl+C), then boot into DFU again for the ramdisk:
+Once the restore completes, stop the DFU boot in terminal 1 (Ctrl+C) so the VM is
+fully powered off. The installer mounts the VM's `Disk.img` on the host, places
+all CFW files, and flips the boot snapshot offline — no DFU, ramdisk, or SSH — so
+it needs exclusive access to the disk.
 
 ```bash
-# terminal 1
-make boot_dfu                 # keep running
-```
-
-```bash
-# terminal 2
-sudo make ramdisk_build       # build signed SSH ramdisk
-make ramdisk_send             # send to device
-```
-
-Once the ramdisk is running (you should see `Running server` in the output), open a **third terminal** for the iproxy tunnel, then install CFW from terminal 2:
-
-```bash
-# terminal 3 — keep running
-iproxy 2222 22
-```
-
-```bash
-# terminal 2
+# terminal 2 (re-execs under sudo automatically)
 make cfw_install
+# or: make cfw_install_dev       # development variant
 # or: make cfw_install_jb        # jailbreak variant
+# or: make cfw_install_exp       # experimental variant (JB + research stack)
+# or: SPOOF_BUILD=23F77 make cfw_install_exp   # additionally rewrite ProductBuildVersion
 ```
 
 ## First Boot
 
-Stop the DFU boot in terminal 1 (Ctrl+C), then:
+With the DFU boot stopped and CFW installed, boot the VM normally:
 
 ```bash
 make boot
@@ -211,13 +230,13 @@ shutdown -h now
 make boot
 ```
 
-In a separate terminal, start iproxy tunnels:
+In a separate terminal, start usbmux forward tunnels:
 
 ```bash
-iproxy 2222 22222    # SSH (dropbear)
-iproxy 2222 22       # SSH (JB: if you install openssh-server from Sileo)
-iproxy 5901 5901     # VNC
-iproxy 5910 5910     # RPC
+python3 -m pymobiledevice3 usbmux forward 2222 22222    # SSH (dropbear)
+python3 -m pymobiledevice3 usbmux forward 2222 22       # SSH (JB: if you install openssh-server from Sileo)
+python3 -m pymobiledevice3 usbmux forward 5901 5901     # VNC
+python3 -m pymobiledevice3 usbmux forward 5910 5910     # RPC
 ```
 
 Connect via:
@@ -302,6 +321,21 @@ make fw_patch
 ```
 
 Our patches are applied via binary analysis, not static offsets, so newer versions should work. If something breaks, ask AI for help.
+
+**Q: I used `restore_offline` and I am stuck in the setup screen**
+
+The device is trying to contact apple for the setup, and you are probably not connected to the internet if you used `restore_offline`.
+You can bypass most of the setup screen by making the device supervised:
+
+```bash
+python3 -m pymobiledevice3 profile supervise vphone
+```
+
+## Automation
+
+vphone-cli exposes a host control socket (`vm/vphone.sock`) for programmatic VM interaction — screenshots, touch injection, swipe gestures, hardware keys, and clipboard. Every action returns a compact grayscale screenshot inline, enabling AI-driven E2E testing workflows.
+
+See [vphone-mcp](https://github.com/pluginslab/vphone-mcp) for an MCP server that wraps this socket with high-level tools (open apps by name, navigate back, scroll, type text) usable from Claude Code or Claude Desktop.
 
 ## Acknowledgements
 

@@ -9,6 +9,7 @@ PROJECT_ROOT="${SCRIPT_DIR:h}"
 
 ASSERT_BOOTABLE=0
 QUIET=0
+LESS=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -18,6 +19,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --quiet)
       QUIET=1
+      shift
+      ;;
+    --less)
+      LESS=1
       shift
       ;;
     *)

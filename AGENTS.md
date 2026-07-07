@@ -28,13 +28,16 @@ For any changes applying new patches, also update research/0_binary_patch_compar
 
 ## Firmware Variants
 
-| Variant         | Boot Chain  |    CFW    | Make Targets                       |
-| --------------- | :---------: | :-------: | ---------------------------------- |
-| **Regular**     | 51 patches  | 10 phases | `fw_patch` + `cfw_install`         |
-| **Development** | 64 patches  | 12 phases | `fw_patch_dev` + `cfw_install_dev` |
-| **Jailbreak**   | 126 patches | 14 phases | `fw_patch_jb` + `cfw_install_jb`   |
+| Variant          | Boot Chain     |    CFW    | Make Targets                       |
+| ---------------- | :------------: | :-------: | ---------------------------------- |
+| **Regular**      | 52 patches     | 10 phases | `fw_patch` + `cfw_install`         |
+| **Development**  | 66 patches     | 12 phases | `fw_patch_dev` + `cfw_install_dev` |
+| **Jailbreak**    | 127 patches    | 14 phases | `fw_patch_jb` + `cfw_install_jb`   |
+| **Experimental** | 141 patches    | 18 phases | `fw_patch_exp` + `cfw_install_exp` |
 
 > JB finalization (symlinks, Sileo, apt, TrollStore) runs automatically on first boot via `/cores/vphone_jb_setup.sh` LaunchDaemon. Monitor progress: `/var/log/vphone_jb_setup.log`.
+
+> EXP is a JB superset that patches the kernel and DSC to make some Apple services think the device is not a VM, while keeping VM-specific services (graphics passthrough, compute/accel fast paths) working correctly. Other variants are deliberately NOT affected by these changes.
 
 See `research/` for detailed firmware pipeline, component origins, patch breakdowns, and boot flow documentation.
 
@@ -95,11 +98,11 @@ scripts/
 ├── patches/                      # Build-time patches (libirecovery)
 ├── fw_prepare.sh                 # Download IPSWs, merge cloudOS into iPhone
 ├── fw_manifest.py                # Generate hybrid BuildManifest/Restore plists
-├── ramdisk_build.py              # Build SSH ramdisk with trustcache (reuses Swift patch-component for TXM/base kernel)
-├── ramdisk_send.sh               # Send ramdisk to device via irecovery
 ├── cfw_install.sh                # Install CFW (regular)
 ├── cfw_install_dev.sh            # Regular + rpcserver daemon
 ├── cfw_install_jb.sh             # Regular + jetsam fix + procursus
+├── cfw_install_exp.sh            # JB + experimental research patches (hv_vmm rename, DT identity)
+├── cfw_install_host.sh           # Host-mount CFW driver (attaches Disk.img, VM off; re-execs sudo)
 ├── vm_create.sh                  # Create VM directory
 ├── setup_machine.sh              # Full automation (setup → first boot)
 ├── setup_tools.sh                # Install deps, build toolchain from submodules, create venv
@@ -107,6 +110,9 @@ scripts/
 ├── setup_venv_linux.sh           # Create Python venv (Linux)
 ├── setup_libimobiledevice.sh     # Build libimobiledevice stack from scripts/repos submodules
 └── tail_jb_patch_logs.sh         # Tail JB patch log output
+
+tools/
+└── apfs_snap_rename.py           # Offline APFS boot-snapshot flip (used by cfw_install_host.sh)
 
 research/                         # Detailed firmware/patch documentation
 ```

@@ -23,8 +23,37 @@ Commands:
     patch-launchd-jetsam <binary>
         Patch launchd jetsam panic guard to avoid initproc crash loop.
 
+    patch-hv-vmm-dsc <chunks_dir> [--dry-run]
+        Same patch, applied in place to the DSC chunks under
+        <chunks_dir> (e.g. /System/Library/Caches/com.apple.dyld inside
+        the mounted SystemOS Cryptex). Targets a fixed list of identity,
+        store, and consumer-service dylibs; skips compute/accel libs.
+
+    patch-camera-dsc <chunks_dir> <dsc_header> [--dry-run] [--force]
+        Apply the 10-patch set to the DSC chunks that makes Camera.app
+        launch-survivable on a vphone VM: synthesises a single
+        `vphone-cam` AVCaptureDevice through `cameracaptured`'s
+        device-list / discovery-session / serializer paths and stubs out
+        the AVFoundation init-time validation that would otherwise crash
+        on the synthetic device. <dsc_header> is the
+        dyld_shared_cache_arm64e file (not a chunk) used for
+        `ipsw dyld symaddr` symbol resolution.
+
+    patch-watchdogd <binary> [--dry-run]
+        Surgical 2-instruction patch of /usr/libexec/watchdogd's
+        sysctlbyname("kern.hv_vmm_present", ...) caching block so the
+        cached "am I a VM?" byte is forced to 1 regardless of the
+        sysctl result. Necessary because the kernel-side OID rename
+        makes that sysctl return ENOENT, which would otherwise drive
+        watchdogd into a trap path that launchd's _PanicOnCrash
+        escalates to a kernel panic. Also recomputes the affected
+        CodeDirectory slot hash via cfw_macho_codesign.
+
     inject-daemons <launchd.plist> <daemon_dir>
         Inject bash/dropbear/trollvnc into launchd.plist.
+
+    patch-dropbear-plist <dropbear.plist>
+        Rewrite dropbear ProgramArguments to use /var/dropbear host keys.
 
     inject-dylib <binary> <dylib_path>
         Inject LC_LOAD_DYLIB into Mach-O binary (thin or universal).
@@ -32,6 +61,7 @@ Commands:
 
 Dependencies:
     pip install capstone keystone-engine
+    ipsw CLI in $PATH (only required for patch-hv-vmm-dsc, experimental variant only)
 """
 
 import os
@@ -46,13 +76,19 @@ if __name__ == "__main__":
     from patchers.cfw_patch_cache_loader import patch_launchd_cache_loader
     from patchers.cfw_patch_mobileactivationd import patch_mobileactivationd
     from patchers.cfw_patch_jetsam import patch_launchd_jetsam
-    from patchers.cfw_daemons import parse_cryptex_paths, inject_daemons
+    from patchers.cfw_patch_hv_vmm_dsc import patch_hv_vmm_in_dsc
+    from patchers.cfw_patch_camera_dsc import apply_all_camera_patches
+    from patchers.cfw_patch_watchdogd import patch_watchdogd
+    from patchers.cfw_daemons import parse_cryptex_paths, inject_daemons, patch_dropbear_plist
 else:
     from .cfw_patch_seputil import patch_seputil
     from .cfw_patch_cache_loader import patch_launchd_cache_loader
     from .cfw_patch_mobileactivationd import patch_mobileactivationd
     from .cfw_patch_jetsam import patch_launchd_jetsam
-    from .cfw_daemons import parse_cryptex_paths, inject_daemons
+    from .cfw_patch_hv_vmm_dsc import patch_hv_vmm_in_dsc
+    from .cfw_patch_camera_dsc import apply_all_camera_patches
+    from .cfw_patch_watchdogd import patch_watchdogd
+    from .cfw_daemons import parse_cryptex_paths, inject_daemons, patch_dropbear_plist
 
 
 def main():
@@ -98,11 +134,49 @@ def main():
         if not patch_launchd_jetsam(sys.argv[2]):
             sys.exit(1)
 
+    elif cmd == "patch-hv-vmm-dsc":
+        if len(sys.argv) < 3:
+            print("Usage: patch_cfw.py patch-hv-vmm-dsc <chunks_dir> [--dry-run]")
+            sys.exit(1)
+        dry_run = "--dry-run" in sys.argv[3:]
+        results = patch_hv_vmm_in_dsc(sys.argv[2], dry_run=dry_run)
+        sys.exit(0)
+
+    elif cmd == "patch-camera-dsc":
+        if len(sys.argv) < 4:
+            print("Usage: patch_cfw.py patch-camera-dsc <chunks_dir> <dsc_header> [--dry-run] [--force]")
+            sys.exit(1)
+        dry_run = "--dry-run" in sys.argv[4:]
+        force   = "--force"   in sys.argv[4:]
+        apply_all_camera_patches(sys.argv[2], sys.argv[3], dry_run=dry_run, force=force)
+        sys.exit(0)
+
+    elif cmd == "patch-watchdogd":
+        if len(sys.argv) < 3:
+            print("Usage: patch_cfw.py patch-watchdogd <binary> [--dry-run]")
+            sys.exit(1)
+        dry_run = "--dry-run" in sys.argv[3:]
+        try:
+            n = patch_watchdogd(sys.argv[2], dry_run=dry_run)
+        except ValueError as e:
+            print(f"[-] {e}")
+            sys.exit(1)
+        # Exit 0 on both "patched N>0" and "already patched (N==0)".
+        # The install script treats both as success; only a raised
+        # exception (unparseable binary / no anchor) is fatal.
+        sys.exit(0)
+
     elif cmd == "inject-daemons":
         if len(sys.argv) < 4:
             print("Usage: patch_cfw.py inject-daemons <launchd.plist> <daemon_dir>")
             sys.exit(1)
         inject_daemons(sys.argv[2], sys.argv[3])
+
+    elif cmd == "patch-dropbear-plist":
+        if len(sys.argv) < 3:
+            print("Usage: patch_cfw.py patch-dropbear-plist <dropbear.plist>")
+            sys.exit(1)
+        patch_dropbear_plist(sys.argv[2])
 
     elif cmd == "inject-dylib":
         if len(sys.argv) < 4:
@@ -127,9 +201,9 @@ def main():
 
     else:
         print(f"Unknown command: {cmd}")
-        print("Commands: cryptex-paths, patch-seputil, patch-launchd-cache-loader,")
+        print("Commands: cryptex-paths, patch-seputil, patch-launchd-cache-loader, patch-camera-dsc,")
         print("          patch-mobileactivationd, patch-launchd-jetsam,")
-        print("          inject-daemons, inject-dylib")
+        print("          patch-hv-vmm-dsc, patch-watchdogd, inject-daemons, patch-dropbear-plist, inject-dylib")
         sys.exit(1)
 
 

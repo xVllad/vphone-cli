@@ -12,6 +12,8 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
     private var keychainWindowController: VPhoneKeychainWindowController?
     private var appWindowController: VPhoneAppWindowController?
     private var locationProvider: VPhoneLocationProvider?
+    private var hostControl: VPhoneHostControl?
+    private var cameraServer: VPhoneCameraServer?
     private var sigintSource: DispatchSourceSignal?
     private var didAttemptAutoInstall = false
 
@@ -46,17 +48,18 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
     private func startVirtualMachine() async throws {
         let options = try cli.resolveOptions()
 
-        guard FileManager.default.fileExists(atPath: options.romURL.path) else {
-            throw VPhoneError.romNotFound(options.romURL.path)
+        guard options.romURL == nil || FileManager.default.fileExists(atPath: options.romURL!.path) else {
+            throw VPhoneError.romNotFound(options.romURL!.path)
         }
 
         print("=== vphone-cli ===")
-        print("ROM   : \(options.romURL.path)")
-        print("Disk  : \(options.diskURL.path)")
-        print("NVRAM : \(options.nvramURL.path)")
-        print("Config: \(options.configURL.path)")
-        print("CPU   : \(options.cpuCount)")
-        print("Memory: \(options.memorySize / 1024 / 1024) MB")
+        print("Variant : \(options.variant)")
+        print("ROM     : \(options.romURL?.path ?? "None")")
+        print("Disk    : \(options.diskURL.path)")
+        print("NVRAM   : \(options.nvramURL.path)")
+        print("Config  : \(options.configURL.path)")
+        print("CPU     : \(options.cpuCount)")
+        print("Memory  : \(options.memorySize / 1024 / 1024) MB")
         print(
             "Screen: \(options.screenWidth)x\(options.screenHeight) @ \(options.screenPPI) PPI (scale \(options.screenScale)x)"
         )
@@ -67,7 +70,7 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
         }
         print("SEP               : enabled")
         print("  storage         : \(options.sepStorageURL.path)")
-        print("  rom             : \(options.sepRomURL.path)")
+        print("  rom             : \(options.sepRomURL?.path ?? "None")")
         print("")
 
         let vm = try VPhoneVirtualMachine(options: options)
@@ -75,7 +78,7 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
 
         try await vm.start(forceDFU: cli.dfu)
 
-        let control = VPhoneControl()
+        let control = VPhoneControl(variant: options.variant)
         self.control = control
         if !cli.dfu {
             let vphonedURL = URL(fileURLWithPath: cli.vphonedBin)
@@ -86,8 +89,12 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
             let provider = VPhoneLocationProvider(control: control)
             locationProvider = provider
 
+            let camServer = VPhoneCameraServer()
+            cameraServer = camServer
+
             if let device = vm.virtualMachine.socketDevices.first as? VZVirtioSocketDevice {
                 control.connect(device: device)
+                camServer.connect(device: device)
             }
         }
 
@@ -133,8 +140,30 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
             if let provider = locationProvider {
                 mc.locationProvider = provider
             }
-            mc.screenRecorder = VPhoneScreenRecorder()
+            if let camServer = cameraServer {
+                mc.cameraServer = camServer
+                camServer.onConnectionStateChange = { [weak mc] connected in
+                    Task { @MainActor in
+                        mc?.updateCameraConnectionState(connected: connected)
+                    }
+                }
+            }
+            let recorder = VPhoneScreenRecorder()
+            mc.screenRecorder = recorder
             menuController = mc
+
+            let socketPath = options.configURL
+                .deletingLastPathComponent()
+                .appendingPathComponent("vphone.sock").path
+            let hc = VPhoneHostControl(socketPath: socketPath)
+            hc.start(
+                captureView: wc.captureView!,
+                screenRecorder: recorder,
+                control: control,
+                screenWidth: options.screenWidth,
+                screenHeight: options.screenHeight
+            )
+            hostControl = hc
 
             // Wire location toggle through onConnect/onDisconnect
             control.onConnect = { [weak mc, weak provider = locationProvider] caps in
@@ -223,6 +252,10 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             print("[install] failed: \(error)")
         }
+    }
+
+    func applicationWillTerminate(_: Notification) {
+        hostControl?.stop()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool {

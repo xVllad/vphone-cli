@@ -8,24 +8,30 @@ Apple の Virtualization.framework と PCC の研究用 VM インフラを使用
 
 ## 検証済み環境
 
-| ホスト        | iPhone                | CloudOS       |
-| ------------- | --------------------- | ------------- |
-| Mac16,12 26.3 | `17,3_26.1_23B85`     | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.3-23D128` |
-| Mac16,12 26.3 | `17,3_26.3.1_23D8133` | `26.3-23D128` |
+| ホスト        | iPhone                | CloudOS         |
+| ------------- | --------------------- | --------------- |
+| Mac16,12 26.3 | `17,3_26.1_23B85`     | `26.1-23B85`    |
+| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.1-23B85`    |
+| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.3-23D128`   |
+| Mac16,12 26.3 | `17,3_26.3.1_23D8133` | `26.3-23D128`   |
+| Mac16,11 26.2 | `17,3_26.4_23E246`    | `26.4-23E5207q` |
+| Mac16,11 26.2 | `17,3_26.5_23F77`     | `26.4-23E5207q` |
 
 ## ファームウェアバリアント
 
-セキュリティバイパスのレベルが異なる3つのパッチバリアントが利用可能です：
+セキュリティバイパスのレベルが異なる5つのパッチバリアントが利用可能です：
 
-| バリアント | ブートチェーン |     CFW     | Make ターゲット                    |
-| ---------- | :------------: | :---------: | ---------------------------------- |
-| **通常版** |   41 パッチ    | 10 フェーズ | `fw_patch` + `cfw_install`         |
-| **開発版** |   52 パッチ    | 12 フェーズ | `fw_patch_dev` + `cfw_install_dev` |
-| **脱獄版** |   112 パッチ   | 14 フェーズ | `fw_patch_jb` + `cfw_install_jb`   |
+| バリアント    | ブートチェーン     |     CFW      | Make ターゲット                              |
+| ------------- | :----------------: | :----------: | -------------------------------------------- |
+| **Patchless** | 4 パッチ           | 2 フェーズ   | `fw_patch_less` + `boot_less`              |
+| **通常版**    | 42 パッチ          | 10 フェーズ  | `fw_patch` + `cfw_install`                   |
+| **開発版**    | 53 パッチ          | 12 フェーズ  | `fw_patch_dev` + `cfw_install_dev`           |
+| **脱獄版**    | 113 パッチ         | 14 フェーズ  | `fw_patch_jb` + `cfw_install_jb`             |
+| **実験版**    | 脱獄 + EXP 専用    | 脱獄 + EXP   | `fw_patch_exp` + `cfw_install_exp`           |
 
 > JB最終設定（シンボリックリンク、Sileo、apt、TrollStore）は `/cores/vphone_jb_setup.sh` LaunchDaemon により初回起動時に自動実行されます。進捗確認：`/var/log/vphone_jb_setup.log`。
+
+> **実験版（EXP）** は脱獄版の上位集合で、リサーチブランチの実験的パッチを追加で実行します：カーネルの `hv_vmm_present` sysctl リネーム + カーネル内部呼び出し元の改変（`KernelEXPPatcher`）、サインインブラックリスト付きの DSC バイト5改変 + スロット再認証、watchdogd 精密 2 命令パッチ（EXP-JB-3.5）、fw_patch 時点での DeviceTree アイデンティティプロパティ 8 件、復元後の DT アイデンティティ書き換え（EXP-JB-6）、`SPOOF_BUILD=<id>` によるオプトイン式の `SystemVersion.plist` `ProductBuildVersion` 書き換え（EXP-JB-7）。他のバリアントは意図的に影響を受けません。
 
 詳細なコンポーネントごとの内訳については [research/0_binary_patch_comparison.md](../research/0_binary_patch_comparison.md) を参照してください。
 
@@ -75,10 +81,15 @@ Apple の Virtualization.framework と PCC の研究用 VM インフラを使用
   sudo amfree --path [PATH_TO_VPHONE_DIR]
   ```
 
+  このリポジトリでは、`make amfidont_allow_vphone` を実行すると
+  `amfidont` 用のエンコード済みパスと CDHash の許可設定をまとめて行えます。
+
+> Patchless バリアントでは、方法 1 か、`-S` フラグ付きの amfidont（`sudo amfidont -S --path [PATH_TO_VPHONE_DIR]`）が必要です。
+
 **依存関係のインストール:**
 
 ```bash
-brew install aria2 ideviceinstaller wget gnu-tar openssl@3 ldid-procursus sshpass keystone autoconf automake pkg-config libtool cmake
+brew install aria2 wget gnu-tar openssl@3 ldid-procursus sshpass keystone libusb ipsw zstd
 ```
 
 `scripts/fw_prepare.sh` は高速な多重接続ダウンロードのために `aria2c` を優先し、必要に応じて `curl` または `wget` にフォールバックします。
@@ -92,22 +103,39 @@ git clone --recurse-submodules https://github.com/Lakr233/vphone-cli.git
 ## クイックスタート
 
 ```bash
-make setup_machine            # 初回起動までを完全自動化（復元/ラムディスク/CFWを含む）
-# オプション：NONE_INTERACTIVE=1 SUDO_PASSWORD=...
+make setup_machine            # 初回起動までを完全自動化（復元/CFWを含む）
+# オプション：NON_INTERACTIVE=1 SUDO_PASSWORD=...
+# LESS=1 で patchless バリアント（- AMFI, SSV, Img4, TXM バイパス）
+# DEV=1 で開発バリアント（+ TXM entitlement/デバッグバイパス）
+# JB=1 で脱獄バリアント（dev + 完全セキュリティバイパス）
+# EXP=1 で実験バリアント（脱獄 + リサーチパッチ: hv_vmm リネーム、DT アイデンティティ、復元後書き換え）
+# SPOOF_BUILD=<id>（EXP 限定）SystemVersion.plist の ProductBuildVersion を <id> に書き換え、例: 23F77
 ```
 
 ## 手動セットアップ
 
 ```bash
-make setup_tools              # brew の依存関係インストール（aria2c を含む）、submodule ソースから trustcache + insert_dylib + libimobiledevice をビルド、Python venv の作成
+make setup_tools              # brew 依存関係のインストール、trustcache + insert_dylib のビルド、Python venv 作成（pymobiledevice3/aria2c を含む）
 make build                    # vphone-cli のビルド + 署名
 make vm_new                   # VM ディレクトリとマニフェスト（config.plist）の作成
 # オプション：CPU=8 MEMORY=8192 DISK_SIZE=64
 make fw_prepare               # IPSW のダウンロード、抽出、マージ、マニフェスト生成
 make fw_patch                 # ブートチェーンのパッチ当て（通常バリアント）
+# または: sudo make fw_patch_less # patchless バリアント（- AMFI, SSV, Img4, TXM バイパス）
 # または: make fw_patch_dev   # 開発バリアント（+ TXM entitlement/デバッグバイパス）
 # または: make fw_patch_jb    # 脱獄バリアント（dev + 完全セキュリティバイパス）
+# または: make fw_patch_exp   # 実験バリアント（脱獄 + リサーチパッチスタック）
 ```
+
+### クリーンアップ
+
+```bash
+make clean                    # ビルド/ツール関連の生成物のみ削除
+make clean CLEAN_VM=1         # 確認後、vm/ も削除
+make clean CLEAN_IPSW=1       # 確認後、ipsws/ も削除
+```
+
+通常の clean では `vm/` や `ipsws/` は削除されません。
 
 ### VM 設定
 
@@ -135,40 +163,27 @@ make boot_dfu                 # DFUモードでVMを起動（実行したまま�
 ```bash
 # ターミナル 2
 make restore_get_shsh         # SHSH blob の取得
-make restore                  # idevicerestore 経由でファームウェアを焼き込み
+make restore                  # pymobiledevice3 restore バックエンドでファームウェアを焼き込み
+# または: make restore_offline    # オフライン復元（AEA イメージをその場で復号し、キャッシュ済み .shsh blob を使用）
+                                  # 初回は AEA 復号のためインターネット接続が必要です
 ```
 
 ## カスタムファームウェアのインストール
 
-ターミナル 1 の DFU 起動を停止し（Ctrl+C）、Ramdisk 用に再び DFU で起動します：
+復元が完了したら、ターミナル 1 の DFU 起動を停止（Ctrl+C）して VM を完全に電源オフにします。インストーラは VM の `Disk.img` をホスト側でマウントし、すべての CFW ファイルを配置してブートスナップショットをオフラインで切り替えます（DFU / Ramdisk / SSH は不要）。そのためディスクへの排他アクセスが必要です。
 
 ```bash
-# ターミナル 1
-make boot_dfu                 # 実行したままにする
-```
-
-```bash
-# ターミナル 2
-sudo make ramdisk_build       # 署名済みSSH Ramdisk のビルド
-make ramdisk_send             # デバイスへ送信
-```
-
-Ramdisk が起動したら（出力に `Running server` と表示されるはずです）、iproxy トンネル用に **3つ目のターミナル** を開き、ターミナル 2 から CFW をインストールします：
-
-```bash
-# ターミナル 3 — 実行したままにする
-iproxy 2222 22
-```
-
-```bash
-# ターミナル 2
+# ターミナル 2（自動的に sudo で再実行されます）
 make cfw_install
+# または: make cfw_install_dev       # 開発バリアント
 # または: make cfw_install_jb        # 脱獄バリアント
+# または: make cfw_install_exp       # 実験バリアント（脱獄 + リサーチパッチスタック）
+# または: SPOOF_BUILD=23F77 make cfw_install_exp   # ProductBuildVersion も書き換え
 ```
 
 ## 初回起動
 
-ターミナル 1 の DFU 起動を停止し（Ctrl+C）、以下を実行します：
+DFU 起動を停止し CFW をインストールしたら、VM を通常起動します：
 
 ```bash
 make boot
@@ -200,13 +215,13 @@ shutdown -h now
 make boot
 ```
 
-別のターミナルで iproxy トンネルを開始します：
+別のターミナルで usbmux 転送トンネルを開始します：
 
 ```bash
-iproxy 2222 22222    # SSH（dropbear）
-iproxy 2222 22       # SSH（脱獄版：Sileo で openssh-server を入れた場合）
-iproxy 5901 5901     # VNC
-iproxy 5910 5910     # RPC
+python3 -m pymobiledevice3 usbmux forward 2222 22222    # SSH（dropbear）
+python3 -m pymobiledevice3 usbmux forward 2222 22       # SSH（脱獄版：Sileo で openssh-server を入れた場合）
+python3 -m pymobiledevice3 usbmux forward 5901 5901     # VNC
+python3 -m pymobiledevice3 usbmux forward 5910 5910     # RPC
 ```
 
 以下で接続します：
@@ -247,6 +262,11 @@ AMFI/デバッグ制限が正しくバイパスされていません。以下の
 
 - **方法 2（デバッグ制限のみ無効化）：**
   復旧モードで `csrutil enable --without debug`（完全な SIP 無効化は不要）を使用し、[`amfidont`](https://github.com/zqxwce/amfidont) または [`amfree`](https://github.com/retX0/amfree) をインストール/ロードして AMFI のその他の機能は有効のままにします。
+  このリポジトリでは、`make amfidont_allow_vphone` により `amfidont` で必要なエンコード済みパスと CDHash の許可設定を自動で行えます。
+
+**Q: `make boot` / `make boot_dfu` が `VZErrorDomain Code=2 "Virtualization is not available on this hardware."` で失敗します**
+
+ホスト自体が Apple 仮想マシン上で動作しているため、ネストされた Virtualization.framework のゲスト起動は利用できません。ネストされていない macOS 15+ ホストで実行してください。`make boot_host_preflight` ではこの状態を `Model Name: Apple Virtual Machine 1` と `kern.hv_vmm_present=1` として確認できます。現在は `boot_binary_check` により、該当ホストでは起動前に早期失敗します。
 
 **Q: システムアプリ（App Store、メッセージなど）がダウンロード・インストールできません**
 
@@ -280,6 +300,15 @@ make fw_patch
 ```
 
 私たちのパッチは静的なオフセットではなくバイナリ解析によって適用されるため、新しいバージョンでも動作するはずです。何か壊れた場合は AI に聞いてください。
+
+**Q: `restore_offline` を使ったらセットアップ画面で進めなくなりました**
+
+セットアップ中に Apple への接続が必要ですが、`restore_offline` を使った場合はインターネットに接続されていない可能性があります。
+デバイスを監視対象（supervised）にすることで、セットアップ画面の多くを回避できます：
+
+```bash
+python3 -m pymobiledevice3 profile supervise vphone
+```
 
 ## 謝辞
 
