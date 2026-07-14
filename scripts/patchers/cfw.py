@@ -29,6 +29,21 @@ Commands:
         the mounted SystemOS Cryptex). Targets a fixed list of identity,
         store, and consumer-service dylibs; skips compute/accel libs.
 
+    patch-iomfb-swapend <chunks_dir> [--dry-run]
+        Patch iOS 26.0 and 26.0.1 IOMobileFramebuffer's _kern_SwapEnd external-method
+        payload size from 0x548 to 0x560 for the PCC vphone600 userclient,
+        then re-attest the modified DSC page hash.
+
+    patch-camera-dsc <chunks_dir> <dsc_header> [--dry-run] [--force]
+        Apply the 10-patch set to the DSC chunks that makes Camera.app
+        launch-survivable on a vphone VM: synthesises a single
+        `vphone-cam` AVCaptureDevice through `cameracaptured`'s
+        device-list / discovery-session / serializer paths and stubs out
+        the AVFoundation init-time validation that would otherwise crash
+        on the synthetic device. <dsc_header> is the
+        dyld_shared_cache_arm64e file (not a chunk) used for
+        `ipsw dyld symaddr` symbol resolution.
+
     patch-watchdogd <binary> [--dry-run]
         Surgical 2-instruction patch of /usr/libexec/watchdogd's
         sysctlbyname("kern.hv_vmm_present", ...) caching block so the
@@ -41,6 +56,9 @@ Commands:
 
     inject-daemons <launchd.plist> <daemon_dir>
         Inject bash/dropbear/trollvnc into launchd.plist.
+
+    patch-dropbear-plist <dropbear.plist>
+        Rewrite dropbear ProgramArguments to use /var/dropbear host keys.
 
     inject-dylib <binary> <dylib_path>
         Inject LC_LOAD_DYLIB into Mach-O binary (thin or universal).
@@ -64,16 +82,20 @@ if __name__ == "__main__":
     from patchers.cfw_patch_mobileactivationd import patch_mobileactivationd
     from patchers.cfw_patch_jetsam import patch_launchd_jetsam
     from patchers.cfw_patch_hv_vmm_dsc import patch_hv_vmm_in_dsc
+    from patchers.cfw_patch_iomfb_swapend import patch_iomfb_swapend
+    from patchers.cfw_patch_camera_dsc import apply_all_camera_patches
     from patchers.cfw_patch_watchdogd import patch_watchdogd
-    from patchers.cfw_daemons import parse_cryptex_paths, inject_daemons
+    from patchers.cfw_daemons import parse_cryptex_paths, inject_daemons, patch_dropbear_plist
 else:
     from .cfw_patch_seputil import patch_seputil
     from .cfw_patch_cache_loader import patch_launchd_cache_loader
     from .cfw_patch_mobileactivationd import patch_mobileactivationd
     from .cfw_patch_jetsam import patch_launchd_jetsam
     from .cfw_patch_hv_vmm_dsc import patch_hv_vmm_in_dsc
+    from .cfw_patch_iomfb_swapend import patch_iomfb_swapend
+    from .cfw_patch_camera_dsc import apply_all_camera_patches
     from .cfw_patch_watchdogd import patch_watchdogd
-    from .cfw_daemons import parse_cryptex_paths, inject_daemons
+    from .cfw_daemons import parse_cryptex_paths, inject_daemons, patch_dropbear_plist
 
 
 def main():
@@ -127,6 +149,27 @@ def main():
         results = patch_hv_vmm_in_dsc(sys.argv[2], dry_run=dry_run)
         sys.exit(0)
 
+    elif cmd == "patch-iomfb-swapend":
+        if len(sys.argv) < 3:
+            print("Usage: patch_cfw.py patch-iomfb-swapend <chunks_dir> [--dry-run]")
+            sys.exit(1)
+        dry_run = "--dry-run" in sys.argv[3:]
+        try:
+            patch_iomfb_swapend(sys.argv[2], dry_run=dry_run)
+        except ValueError as e:
+            print(f"[-] {e}")
+            sys.exit(1)
+        sys.exit(0)
+
+    elif cmd == "patch-camera-dsc":
+        if len(sys.argv) < 4:
+            print("Usage: patch_cfw.py patch-camera-dsc <chunks_dir> <dsc_header> [--dry-run] [--force]")
+            sys.exit(1)
+        dry_run = "--dry-run" in sys.argv[4:]
+        force   = "--force"   in sys.argv[4:]
+        apply_all_camera_patches(sys.argv[2], sys.argv[3], dry_run=dry_run, force=force)
+        sys.exit(0)
+
     elif cmd == "patch-watchdogd":
         if len(sys.argv) < 3:
             print("Usage: patch_cfw.py patch-watchdogd <binary> [--dry-run]")
@@ -147,6 +190,12 @@ def main():
             print("Usage: patch_cfw.py inject-daemons <launchd.plist> <daemon_dir>")
             sys.exit(1)
         inject_daemons(sys.argv[2], sys.argv[3])
+
+    elif cmd == "patch-dropbear-plist":
+        if len(sys.argv) < 3:
+            print("Usage: patch_cfw.py patch-dropbear-plist <dropbear.plist>")
+            sys.exit(1)
+        patch_dropbear_plist(sys.argv[2])
 
     elif cmd == "inject-dylib":
         if len(sys.argv) < 4:
@@ -171,9 +220,10 @@ def main():
 
     else:
         print(f"Unknown command: {cmd}")
-        print("Commands: cryptex-paths, patch-seputil, patch-launchd-cache-loader,")
+        print("Commands: cryptex-paths, patch-seputil, patch-launchd-cache-loader, patch-camera-dsc,")
         print("          patch-mobileactivationd, patch-launchd-jetsam,")
-        print("          patch-hv-vmm-dsc, patch-watchdogd, inject-daemons, inject-dylib")
+        print("          patch-hv-vmm-dsc, patch-iomfb-swapend, patch-watchdogd,")
+        print("          inject-daemons, patch-dropbear-plist, inject-dylib")
         sys.exit(1)
 
 

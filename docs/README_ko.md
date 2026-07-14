@@ -8,12 +8,20 @@ PCC 리서치 VM 인프라와 Apple의 Virtualization.framework를 사용하여 
 
 ## 테스트된 환경
 
-| Host          | iPhone                | CloudOS       |
-| ------------- | --------------------- | ------------- |
-| Mac16,12 26.3 | `17,3_26.1_23B85`     | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.3-23D128` |
-| Mac16,12 26.3 | `17,3_26.3.1_23D8133` | `26.3-23D128` |
+| Host            | iPhone                | CloudOS         |
+| --------------- | --------------------- | --------------- |
+| Mac16,11 27.0b2 | `17,3_18.6.2_22G100`  | `26.1-23B85`    |
+| Mac16,8 26.5.1  | `17,3_26.0_23A341`    | `26.1-23B85`    |
+| Mac16,8 26.5.1  | `17,3_26.0.1_23A355`  | `26.1-23B85`    |
+| Mac16,12 26.3   | `17,3_26.1_23B85`     | `26.1-23B85`    |
+| Mac16,12 26.3   | `17,3_26.3_23D127`    | `26.1-23B85`    |
+| Mac16,12 26.3   | `17,3_26.3_23D127`    | `26.3-23D128`   |
+| Mac16,12 26.3   | `17,3_26.3.1_23D8133` | `26.3-23D128`   |
+| Mac16,11 26.2   | `17,3_26.4_23E246`    | `26.4-23E5207q` |
+| Mac16,11 26.2   | `17,3_26.5_23F77`     | `26.4-23E5207q` |
+| Mac16,11 27.0b2 | `17,3_26.5.2_23F84`   | `26.4-23E5207q` |
+
+**참고:** iOS 18.x에서는 Metal/GPU 가속이 작동하지 않습니다. 18.x의 Metal/IOGPU 프레임워크에 반가상화 GPU 구현이 없기 때문에 Metal로 렌더링되는 콘텐츠(웹 페이지, 이미지, 배경화면)가 표시되지 않습니다. 터치, 네트워크, 앱은 정상적으로 작동합니다.
 
 ## 펌웨어 변형
 
@@ -21,10 +29,10 @@ PCC 리서치 VM 인프라와 Apple의 Virtualization.framework를 사용하여 
 
 | 변형           | 부트 체인         |    CFW     | Make 타겟                                   |
 | -------------- | :---------------: | :--------: | ------------------------------------------- |
-| **Patchless**  |  3 패치           | 2 페이즈   | `fw_patch_less` + `boot_less`             |
-| **일반**       |  41 패치          | 10 페이즈  | `fw_patch` + `cfw_install`                  |
-| **개발**       |  52 패치          | 12 페이즈  | `fw_patch_dev` + `cfw_install_dev`          |
-| **탈옥**       | 112 패치          | 14 페이즈  | `fw_patch_jb` + `cfw_install_jb`            |
+| **Patchless**  |  4 패치           | 2 페이즈   | `fw_patch_less` + `boot_less`             |
+| **일반**       |  42 패치          | 10 페이즈  | `fw_patch` + `cfw_install`                  |
+| **개발**       |  53 패치          | 12 페이즈  | `fw_patch_dev` + `cfw_install_dev`          |
+| **탈옥**       | 113 패치          | 14 페이즈  | `fw_patch_jb` + `cfw_install_jb`            |
 | **실험**       | 탈옥 + EXP 전용   | 탈옥 + EXP | `fw_patch_exp` + `cfw_install_exp`          |
 
 > JB 최종 설정(심볼릭 링크, Sileo, apt, TrollStore)은 `/cores/vphone_jb_setup.sh` LaunchDaemon을 통해 첫 번째 부팅 시 자동으로 실행됩니다. 진행 상황 확인: `/var/log/vphone_jb_setup.log`.
@@ -101,8 +109,8 @@ git clone --recurse-submodules https://github.com/Lakr233/vphone-cli.git
 ## 빠른 시작
 
 ```bash
-make setup_machine            # "First Boot"까지의 전체 과정 자동화 (복원/Ramdisk/커스텀 펌웨어 포함)
-# 옵션: NONE_INTERACTIVE=1 SUDO_PASSWORD=...
+make setup_machine            # "First Boot"까지의 전체 과정 자동화 (복원/커스텀 펌웨어 포함)
+# 옵션: NON_INTERACTIVE=1 SUDO_PASSWORD=...
 # LESS=1 Patchless 변형 (- AMFI, SSV, Img4, TXM 우회)
 # DEV=1 개발 변형 (+ TXM 권한/디버그 우회)
 # JB=1 탈옥 변형 (dev + 전체 보안 우회)
@@ -168,29 +176,12 @@ make restore                  # pymobiledevice3 restore 백엔드로 펌웨어 �
 
 ## 커스텀 펌웨어 설치
 
-터미널 1의 DFU 부팅을 중단(Ctrl+C)한 다음, 램디스크를 위해 다시 DFU로 부팅합니다:
+복원이 완료되면 터미널 1의 DFU 부팅을 중단(Ctrl+C)하여 VM을 완전히 종료합니다. 설치 프로그램은 VM의 `Disk.img`를 호스트에 마운트하여 모든 CFW 파일을 배치하고 부팅 스냅샷을 오프라인으로 전환합니다(DFU / 램디스크 / SSH 불필요). 따라서 디스크에 대한 독점 액세스가 필요합니다.
 
 ```bash
-# 터미널 1
-make boot_dfu                 # 계속 실행 유지
-```
-
-```bash
-# 터미널 2
-sudo make ramdisk_build       # 서명된 SSH 램디스크 빌드
-make ramdisk_send             # 장치로 전송
-```
-
-램디스크가 실행되면(출력에 `Running server`가 표시됨), **세 번째 터미널**을 열어 usbmux 터널을 시작한 후, 터미널 2에서 커스텀 펌웨어를 설치합니다:
-
-```bash
-# 터미널 3 — 계속 실행 유지
-python3 -m pymobiledevice3 usbmux forward 2222 22
-```
-
-```bash
-# 터미널 2
+# 터미널 2 (자동으로 sudo로 재실행됨)
 make cfw_install
+# 또는: make cfw_install_dev       # 개발 변형
 # 또는: make cfw_install_jb        # 탈옥 변형
 # 또는: make cfw_install_exp       # 실험 변형 (탈옥 + 연구 패치 스택)
 # 또는: SPOOF_BUILD=23F77 make cfw_install_exp   # 추가로 ProductBuildVersion 재작성
@@ -198,7 +189,7 @@ make cfw_install
 
 ## 첫 부팅
 
-터미널 1의 DFU 부팅을 중단(Ctrl+C)한 후 다음을 실행합니다:
+DFU 부팅을 중단하고 CFW를 설치한 후, VM을 정상 부팅합니다:
 
 ```bash
 make boot

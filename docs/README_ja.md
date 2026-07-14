@@ -8,12 +8,20 @@ Apple の Virtualization.framework と PCC の研究用 VM インフラを使用
 
 ## 検証済み環境
 
-| ホスト        | iPhone                | CloudOS       |
-| ------------- | --------------------- | ------------- |
-| Mac16,12 26.3 | `17,3_26.1_23B85`     | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.3-23D128` |
-| Mac16,12 26.3 | `17,3_26.3.1_23D8133` | `26.3-23D128` |
+| ホスト           | iPhone                | CloudOS         |
+| --------------- | --------------------- | --------------- |
+| Mac16,11 27.0b2 | `17,3_18.6.2_22G100`  | `26.1-23B85`    |
+| Mac16,8 26.5.1  | `17,3_26.0_23A341`    | `26.1-23B85`    |
+| Mac16,8 26.5.1  | `17,3_26.0.1_23A355`  | `26.1-23B85`    |
+| Mac16,12 26.3   | `17,3_26.1_23B85`     | `26.1-23B85`    |
+| Mac16,12 26.3   | `17,3_26.3_23D127`    | `26.1-23B85`    |
+| Mac16,12 26.3   | `17,3_26.3_23D127`    | `26.3-23D128`   |
+| Mac16,12 26.3   | `17,3_26.3.1_23D8133` | `26.3-23D128`   |
+| Mac16,11 26.2   | `17,3_26.4_23E246`    | `26.4-23E5207q` |
+| Mac16,11 26.2   | `17,3_26.5_23F77`     | `26.4-23E5207q` |
+| Mac16,11 27.0b2 | `17,3_26.5.2_23F84`   | `26.4-23E5207q` |
+
+**注意:** iOS 18.x では Metal/GPU アクセラレーションは動作しません。18.x の Metal/IOGPU フレームワークに準仮想化 GPU の実装が存在しないため、Metal でレンダリングされるコンテンツ（Web ページ、画像、壁紙）は表示されません。タッチ、ネットワーク、アプリは正常に動作します。
 
 ## ファームウェアバリアント
 
@@ -21,10 +29,10 @@ Apple の Virtualization.framework と PCC の研究用 VM インフラを使用
 
 | バリアント    | ブートチェーン     |     CFW      | Make ターゲット                              |
 | ------------- | :----------------: | :----------: | -------------------------------------------- |
-| **Patchless** | 3 パッチ           | 2 フェーズ   | `fw_patch_less` + `boot_less`              |
-| **通常版**    | 41 パッチ          | 10 フェーズ  | `fw_patch` + `cfw_install`                   |
-| **開発版**    | 52 パッチ          | 12 フェーズ  | `fw_patch_dev` + `cfw_install_dev`           |
-| **脱獄版**    | 112 パッチ         | 14 フェーズ  | `fw_patch_jb` + `cfw_install_jb`             |
+| **Patchless** | 4 パッチ           | 2 フェーズ   | `fw_patch_less` + `boot_less`              |
+| **通常版**    | 42 パッチ          | 10 フェーズ  | `fw_patch` + `cfw_install`                   |
+| **開発版**    | 53 パッチ          | 12 フェーズ  | `fw_patch_dev` + `cfw_install_dev`           |
+| **脱獄版**    | 113 パッチ         | 14 フェーズ  | `fw_patch_jb` + `cfw_install_jb`             |
 | **実験版**    | 脱獄 + EXP 専用    | 脱獄 + EXP   | `fw_patch_exp` + `cfw_install_exp`           |
 
 > JB最終設定（シンボリックリンク、Sileo、apt、TrollStore）は `/cores/vphone_jb_setup.sh` LaunchDaemon により初回起動時に自動実行されます。進捗確認：`/var/log/vphone_jb_setup.log`。
@@ -101,8 +109,8 @@ git clone --recurse-submodules https://github.com/Lakr233/vphone-cli.git
 ## クイックスタート
 
 ```bash
-make setup_machine            # 初回起動までを完全自動化（復元/ラムディスク/CFWを含む）
-# オプション：NONE_INTERACTIVE=1 SUDO_PASSWORD=...
+make setup_machine            # 初回起動までを完全自動化（復元/CFWを含む）
+# オプション：NON_INTERACTIVE=1 SUDO_PASSWORD=...
 # LESS=1 で patchless バリアント（- AMFI, SSV, Img4, TXM バイパス）
 # DEV=1 で開発バリアント（+ TXM entitlement/デバッグバイパス）
 # JB=1 で脱獄バリアント（dev + 完全セキュリティバイパス）
@@ -168,29 +176,12 @@ make restore                  # pymobiledevice3 restore バックエンドでフ
 
 ## カスタムファームウェアのインストール
 
-ターミナル 1 の DFU 起動を停止し（Ctrl+C）、Ramdisk 用に再び DFU で起動します：
+復元が完了したら、ターミナル 1 の DFU 起動を停止（Ctrl+C）して VM を完全に電源オフにします。インストーラは VM の `Disk.img` をホスト側でマウントし、すべての CFW ファイルを配置してブートスナップショットをオフラインで切り替えます（DFU / Ramdisk / SSH は不要）。そのためディスクへの排他アクセスが必要です。
 
 ```bash
-# ターミナル 1
-make boot_dfu                 # 実行したままにする
-```
-
-```bash
-# ターミナル 2
-sudo make ramdisk_build       # 署名済みSSH Ramdisk のビルド
-make ramdisk_send             # デバイスへ送信
-```
-
-Ramdisk が起動したら（出力に `Running server` と表示されるはずです）、usbmux トンネル用に **3つ目のターミナル** を開き、ターミナル 2 から CFW をインストールします：
-
-```bash
-# ターミナル 3 — 実行したままにする
-python3 -m pymobiledevice3 usbmux forward 2222 22
-```
-
-```bash
-# ターミナル 2
+# ターミナル 2（自動的に sudo で再実行されます）
 make cfw_install
+# または: make cfw_install_dev       # 開発バリアント
 # または: make cfw_install_jb        # 脱獄バリアント
 # または: make cfw_install_exp       # 実験バリアント（脱獄 + リサーチパッチスタック）
 # または: SPOOF_BUILD=23F77 make cfw_install_exp   # ProductBuildVersion も書き換え
@@ -198,7 +189,7 @@ make cfw_install
 
 ## 初回起動
 
-ターミナル 1 の DFU 起動を停止し（Ctrl+C）、以下を実行します：
+DFU 起動を停止し CFW をインストールしたら、VM を通常起動します：
 
 ```bash
 make boot

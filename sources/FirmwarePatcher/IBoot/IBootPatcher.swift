@@ -5,8 +5,8 @@
 //
 // Patch schedule by mode:
 //   ibss — serial labels + image4 callback
-//   ibec — ibss + boot-args
-//   llb  — ibec + rootfs bypass (5 patches) + panic bypass
+//   ibec — serial labels + image4 callback + boot-args + bootx precondition (if present)
+//   llb  — serial labels + image4 callback + boot-args + rootfs bypass (5 patches) + panic bypass
 
 import Capstone
 import Foundation
@@ -35,6 +35,14 @@ public class IBootPatcher: Patcher {
     public let component: String
     public let verbose: Bool
 
+    /// Extra boot-args token(s) inserted before the trailing `%s` in the
+    /// patched boot-args (ibec/llb). Used to add `if_attach_nx=0x3` on iOS 18
+    /// bases (disables the skywalk flowswitch netagents so Network.framework
+    /// uses the BSD path; the 26.1-kernel skywalk channel-create traps in the
+    /// 18.x Network.framework and crash-loops mDNSResponder → no DNS). Empty
+    /// by default, so 26.x bases keep the stock boot-args.
+    public var extraBootArgs: String = ""
+
     let buffer: BinaryBuffer
     let mode: Mode
     let disasm = ARM64Disassembler()
@@ -57,8 +65,13 @@ public class IBootPatcher: Patcher {
         patchSerialLabels()
         patchImage4Callback()
 
-        if mode == .ibec || mode == .llb {
+        if mode == .llb {
             patchBootArgs()
+        }
+
+        if mode == .ibec {
+            patchBootArgs()
+            patchBootxPrecondition()
         }
 
         if mode == .llb {
@@ -218,6 +231,16 @@ public class IBootPatcher: Patcher {
         }
 
         if eqRuns.count < 2 {
+            var labelCount = 0
+            var searchStart = raw.startIndex
+            while let range = raw.range(of: labelBytes, in: searchStart ..< raw.endIndex) {
+                labelCount += 1
+                searchStart = range.upperBound
+            }
+            if labelCount >= 2 {
+                if verbose { print("  [*] serial labels: already present, skipping") }
+                return
+            }
             if verbose { print("  [-] serial labels: <2 banner runs found") }
             return
         }
@@ -290,9 +313,17 @@ public class IBootPatcher: Patcher {
 
     // MARK: - 3. Boot-Args (iBEC / LLB)
 
+    /// Effective boot-args string, with any `extraBootArgs` inserted before `%s`.
+    private var effectiveBootArgs: String {
+        extraBootArgs.isEmpty
+            ? IBootPatcher.bootArgs
+            : "serial=3 -v debug=0x2014e \(extraBootArgs) %s"
+    }
+
     /// Redirect ADRP+ADD x2 to a custom boot-args string.
     /// Python: `patch_boot_args()`
-    func patchBootArgs(newArgs: String = IBootPatcher.bootArgs) {
+    func patchBootArgs(newArgs: String? = nil) {
+        let newArgs = newArgs ?? effectiveBootArgs
         guard let newArgsData = newArgs.data(using: .ascii) else { return }
 
         guard let fmtOff = findBootArgsFmt() else {
@@ -473,38 +504,27 @@ public class IBootPatcher: Patcher {
         emit(cbzOff, bInsn, id: "\(component).rootfs_cbz_0x\(String(errorCode, radix: 16))", description: description)
     }
 
-    /// Find the unique `cmp x8, #0x400` and NOP the `b.hs` that follows.
+    /// NOP the `b.hs` of the unique `cmp x8,#0x400 ; b.hs` rootfs size gate.
+    /// Anchoring on the cmp+b.hs pair disambiguates 26.4's three `cmp x8,#0x400`
+    /// (the other two are followed by `b.hi`); 26.1/26.3 have just the one.
     /// Python: `_patch_bhs_after_cmp_0x400()`
     private func patchBhsAfterCmp0x400() {
-        // Scan every instruction for cmp x8, #0x400 — avoids hand-encoding the
-        // CMP/SUBS encoding and stays robust across Capstone output variants.
-        var locs: [Int] = []
+        var bhsSites: [Int] = []
         for insns in chunkedDisasm() {
-            for insn in insns {
-                if insn.mnemonic == "cmp", insn.operandString == "x8, #0x400" {
-                    locs.append(Int(insn.address))
-                }
+            for insn in insns where insn.mnemonic == "cmp" && insn.operandString == "x8, #0x400" {
+                let bhsOff = Int(insn.address) + 4
+                guard let next = disasm.disassembleOne(in: buffer.original, at: bhsOff),
+                      next.mnemonic == "b.hs" else { continue }
+                if !bhsSites.contains(bhsOff) { bhsSites.append(bhsOff) }
             }
         }
 
-        guard locs.count == 1 else {
-            if verbose { print("  [-] rootfs b.hs: expected 1 'cmp x8, #0x400', found \(locs.count)") }
+        guard bhsSites.count == 1 else {
+            if verbose { print("  [-] rootfs b.hs: expected 1 'cmp x8,#0x400 ; b.hs' pair, found \(bhsSites.count)") }
             return
         }
 
-        let cmpOff = locs[0]
-        let bhsOff = cmpOff + 4
-
-        guard let insn = disasm.disassembleOne(in: buffer.original, at: bhsOff) else {
-            if verbose { print("  [-] rootfs b.hs: no instruction at 0x\(String(format: "%X", bhsOff))") }
-            return
-        }
-        guard insn.mnemonic == "b.hs" else {
-            if verbose { print("  [-] rootfs b.hs: expected b.hs at 0x\(String(format: "%X", bhsOff)), got \(insn.mnemonic)") }
-            return
-        }
-
-        emit(bhsOff, ARM64.nop, id: "\(component).rootfs_bhs_0x400", description: "rootfs: NOP b.hs size check (0x400)")
+        emit(bhsSites[0], ARM64.nop, id: "\(component).rootfs_bhs_0x400", description: "rootfs: NOP b.hs size check (0x400)")
     }
 
     /// Find `ldr xR, [xN, #0x78]; cbz xR` preceding the unique `mov w8, #0x110`
@@ -587,5 +607,177 @@ public class IBootPatcher: Patcher {
         }
 
         if verbose { print("  [-] panic bypass: pattern not found") }
+    }
+
+    // MARK: - 6. Bootx-handoff precondition (modern iBoot, all stages)
+
+    /// NOP the conditional branch gating the modern iBoot bootx-handoff
+    /// panic. 
+    ///
+    /// Gate signature (Capstone-decoded):
+    ///
+    ///     BL  <bit_getter>            ; tiny 4-insn `return bit_N([global])` fn
+    ///     TBZ w0, #0, <panic_block>   ; patch target — NOP'd
+    ///     ...
+    ///     <panic_block>:
+    ///         BL  <hash_getter>       ; 5-insn 4×MOV/MOVK+RET source-hash fn
+    ///         MOV w?, #<lineno>       ; source line (any value)
+    ///         BL  <log_func>          ; panic/log dispatcher
+    ///
+    /// `<bit_getter>` is `ADRP; LDRB; UBFX Wd, Wn, #?, #1; RET` — a
+    /// "return one bit of one byte at a global address" function (rare in
+    /// iBoot). The combination of "TBZ w0, #0 → panic" where the preceding
+    /// instruction is BL to such a function, and the TBZ target is a
+    /// hash-getter/MOVZ-line/BL-log triple, is the distinctive shape.
+    ///
+    /// Refuses to patch on ambiguity (multiple matches).
+    func patchBootxPrecondition() {
+        let hashGetters = enumerateHashGetters()
+        let bitGetters  = enumerateBitGetters()
+
+        guard !hashGetters.isEmpty, !bitGetters.isEmpty else {
+            if verbose {
+                print("  [-] bootx precondition: hash-getter or bit-getter pattern absent")
+            }
+            return
+        }
+
+        let panicBlocks = enumeratePanicBlocks(hashGetters: hashGetters)
+        if panicBlocks.isEmpty {
+            if verbose { print("  [-] bootx precondition: no panic-shaped call blocks") }
+            return
+        }
+
+        var gates = Set<Int>()
+        for insns in chunkedDisasm() {
+            guard insns.count >= 2 else { continue }
+            for i in 1 ..< insns.count {
+                let tbz = insns[i]
+                let prev = insns[i - 1]
+                guard tbz.mnemonic == "tbz" else { continue }
+                guard
+                    let tbzDet = tbz.aarch64,
+                    tbzDet.operands.count >= 3,
+                    tbzDet.operands[0].type == AARCH64_OP_REG,
+                    tbzDet.operands[0].reg.rawValue == AARCH64_REG_W0.rawValue,
+                    tbzDet.operands[1].type == AARCH64_OP_IMM,
+                    tbzDet.operands[1].imm == 0,
+                    tbzDet.operands[2].type == AARCH64_OP_IMM
+                else { continue }
+                let target = Int(tbzDet.operands[2].imm)
+                guard panicBlocks.contains(target) else { continue }
+
+                guard prev.mnemonic == "bl" else { continue }
+                guard
+                    let prevDet = prev.aarch64,
+                    prevDet.operands.count >= 1,
+                    prevDet.operands[0].type == AARCH64_OP_IMM
+                else { continue }
+                let blTarget = Int(prevDet.operands[0].imm)
+                guard bitGetters.contains(blTarget) else { continue }
+
+                gates.insert(Int(tbz.address))
+            }
+        }
+
+        if gates.isEmpty {
+            // 26.4+ construct; genuinely absent on previous iBoot versions.
+            if verbose { print("  [.] bootx precondition: construct not present (pre-26.4 iBoot) — skipping") }
+            return
+        }
+        if gates.count > 1 {
+            if verbose {
+                print("  [-] bootx precondition: ambiguous (\(gates.count) candidates)")
+                for g in gates.sorted() { print(String(format: "      0x%X", g)) }
+            }
+            return
+        }
+        let gate = gates.first!
+        emit(gate, ARM64.nop, id: "\(component).bootx_precondition",
+             description: "bootx precondition: NOP gate TBZ")
+    }
+
+    /// Enumerate 5-insn `MOVZ + 3×MOVK + RET` functions assembling a 64-bit
+    /// constant into a single X register (used by iBoot's panic/log calls
+    /// to load the source-file hash). Returns the file offsets at which
+    /// each such function starts.
+    private func enumerateHashGetters() -> Set<Int> {
+        var out = Set<Int>()
+        for insns in chunkedDisasm() {
+            guard insns.count >= 5 else { continue }
+            for i in 0 ..< (insns.count - 4) {
+                guard insns[i].mnemonic == "mov" || insns[i].mnemonic == "movz" else { continue }
+                guard insns[i + 1].mnemonic == "movk" else { continue }
+                guard insns[i + 2].mnemonic == "movk" else { continue }
+                guard insns[i + 3].mnemonic == "movk" else { continue }
+                guard insns[i + 4].mnemonic == "ret"  else { continue }
+                // All four MOV/MOVK destinations must be the same register.
+                var regs = Set<UInt32>()
+                var ok = true
+                for k in 0 ..< 4 {
+                    guard
+                        let det = insns[i + k].aarch64,
+                        det.operands.count >= 1,
+                        det.operands[0].type == AARCH64_OP_REG
+                    else { ok = false; break }
+                    regs.insert(det.operands[0].reg.rawValue)
+                }
+                guard ok, regs.count == 1 else { continue }
+                out.insert(Int(insns[i].address))
+            }
+        }
+        return out
+    }
+
+    /// Enumerate 4-insn `ADRP + LDRB + UBFX (width=1) + RET` functions —
+    /// the "return one bit of one byte global" shape used as the
+    /// precondition feature-check. Any bit position is accepted; only the
+    /// width-1 extract is enforced.
+    private func enumerateBitGetters() -> Set<Int> {
+        var out = Set<Int>()
+        for insns in chunkedDisasm() {
+            guard insns.count >= 4 else { continue }
+            for i in 0 ..< (insns.count - 3) {
+                let mnems = [
+                    insns[i].mnemonic, insns[i + 1].mnemonic,
+                    insns[i + 2].mnemonic, insns[i + 3].mnemonic,
+                ]
+                guard mnems == ["adrp", "ldrb", "ubfx", "ret"] else { continue }
+                guard
+                    let det = insns[i + 2].aarch64,
+                    det.operands.count >= 4,
+                    det.operands[3].type == AARCH64_OP_IMM,
+                    det.operands[3].imm == 1
+                else { continue }
+                out.insert(Int(insns[i].address))
+            }
+        }
+        return out
+    }
+
+    /// Enumerate "panic block" call sites: 3-insn sequence of
+    /// `BL <hash_getter>; MOV W?, #<imm>; BL <anything>`. Returns the file
+    /// offset of the first BL in each such triple.
+    private func enumeratePanicBlocks(hashGetters: Set<Int>) -> Set<Int> {
+        var out = Set<Int>()
+        for insns in chunkedDisasm() {
+            guard insns.count >= 3 else { continue }
+            for i in 0 ..< (insns.count - 2) {
+                guard
+                    insns[i].mnemonic == "bl",
+                    (insns[i + 1].mnemonic == "mov" || insns[i + 1].mnemonic == "movz"),
+                    insns[i + 2].mnemonic == "bl"
+                else { continue }
+                guard
+                    let det = insns[i].aarch64,
+                    det.operands.count >= 1,
+                    det.operands[0].type == AARCH64_OP_IMM
+                else { continue }
+                let blTarget = Int(det.operands[0].imm)
+                guard hashGetters.contains(blTarget) else { continue }
+                out.insert(Int(insns[i].address))
+            }
+        }
+        return out
     }
 }

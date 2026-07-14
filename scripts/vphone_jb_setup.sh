@@ -1,7 +1,7 @@
 #!/bin/bash
 # vphone_jb_setup.sh — First-boot JB finalization script.
 #
-# Deployed to /cores/ during cfw_install_jb.sh (ramdisk phase).
+# Deployed to /cores/ during cfw_install_jb.sh.
 # Runs automatically via LaunchDaemon on first normal boot.
 # Idempotent — safe to re-run on subsequent boots.
 #
@@ -13,25 +13,8 @@ set -uo pipefail
 LOG="/var/log/vphone_jb_setup.log"
 DONE_MARKER="/var/mobile/.vphone_jb_setup_done"
 
-log() { echo "[$(date '+%H:%M:%S')] $*" | tee -a "$LOG"; }
-die() { log "FATAL: $*"; exit 1; }
-
-# Redirect all output to log
-exec > >(tee -a "$LOG") 2>&1
-
-log "=== vphone_jb_setup.sh starting ==="
-
-# ── Check done marker ────────────────────────────────────────
-if [ -f "$DONE_MARKER" ]; then
-    log "Already completed (marker exists), exiting."
-    exit 0
-fi
-
-# ── Environment ──────────────────────────────────────────────
 export TERM=xterm-256color
 export DEBIAN_FRONTEND=noninteractive
-
-# Discover PATH dynamically
 P=""
 for d in \
     /var/jb/usr/bin /var/jb/bin /var/jb/sbin /var/jb/usr/sbin \
@@ -40,7 +23,23 @@ for d in \
     [ -d "$d" ] && P="$P:$d"
 done
 export PATH="${P#:}"
+
+# Redirect all output (stdout+stderr) through tee to the log + console.
+exec > >(tee -a "$LOG") 2>&1
+
+# NOTE: log() does NOT pipe through tee — stdout is already tee'd to $LOG by the
+# exec above, so a second tee here would double every timestamped line.
+log() { echo "[$(date '+%H:%M:%S')] $*"; }
+die() { log "FATAL: $*"; exit 1; }
+
+log "=== vphone_jb_setup.sh starting ==="
 log "PATH=$PATH"
+
+# ── Check done marker ────────────────────────────────────────
+if [ -f "$DONE_MARKER" ]; then
+    log "Already completed (marker exists), exiting."
+    exit 0
+fi
 
 # ── Find boot manifest hash ─────────────────────────────────
 BOOT_HASH=""
@@ -93,11 +92,36 @@ fi
 # ═══════════ 2/7 FIX OWNERSHIP / PERMISSIONS ═════════════════
 log "[2/8] Fixing mobile Library ownership..."
 mkdir -p /var/jb/var/mobile/Library/Preferences
+mkdir -p /var/jb/Library/MobileSubstrate/DynamicLibraries
 chown -R 501:501 /var/jb/var/mobile/Library
 chmod 0755 /var/jb/var/mobile/Library
 chown -R 501:501 /var/jb/var/mobile/Library/Preferences
 chmod 0755 /var/jb/var/mobile/Library/Preferences
+chown 0:0 /var/jb/Library /var/jb/Library/MobileSubstrate /var/jb/Library/MobileSubstrate/DynamicLibraries
+chmod 0755 /var/jb/Library /var/jb/Library/MobileSubstrate /var/jb/Library/MobileSubstrate/DynamicLibraries
 log "  Ownership set"
+
+log "[2a/8] Preparing dropbear host keys..."
+mkdir -p /var/dropbear
+DROPBEARKEY=""
+for p in /iosbinpack64/usr/local/bin/dropbearkey /iosbinpack64/usr/local/dropbearkey /var/jb/usr/bin/dropbearkey; do
+    [ -x "$p" ] && DROPBEARKEY="$p" && break
+done
+if [ -n "$DROPBEARKEY" ]; then
+    [ -f /var/dropbear/dropbear_rsa_host_key ] || "$DROPBEARKEY" -t rsa -f /var/dropbear/dropbear_rsa_host_key >/dev/null
+    [ -f /var/dropbear/dropbear_ecdsa_host_key ] || "$DROPBEARKEY" -t ecdsa -f /var/dropbear/dropbear_ecdsa_host_key >/dev/null
+    if [ -f /var/dropbear/dropbear_rsa_host_key ] && [ -f /var/dropbear/dropbear_ecdsa_host_key ]; then
+        if chmod 0600 /var/dropbear/dropbear_rsa_host_key /var/dropbear/dropbear_ecdsa_host_key; then
+            log "  dropbear host keys ready"
+        else
+            log "  WARNING: dropbear host key chmod failed"
+        fi
+    else
+        log "  WARNING: dropbear host key generation incomplete"
+    fi
+else
+    log "  WARNING: dropbearkey not found"
+fi
 
 # ═══════════ 3/7 RUN prep_bootstrap.sh ═══════════════════════
 log "[3/8] Running prep_bootstrap.sh..."
@@ -147,6 +171,44 @@ else
     fi
 fi
 
+# ═══════════ 5b/8 INSTALL EXTRA DEBS ═════════════════════════
+log "[5b/8] Installing extra debs..."
+DEBS_DIR="/private/preboot/$BOOT_HASH/debs"
+if [ -d "$DEBS_DIR" ]; then
+    to_install=()
+    for deb in "$DEBS_DIR"/*.deb; do
+        [ -f "$deb" ] || continue
+        name="$(basename "$deb")"
+        pkg="$(dpkg-deb -f "$deb" Package 2>/dev/null)"
+        ver="$(dpkg-deb -f "$deb" Version 2>/dev/null)"
+        if [ -z "$pkg" ]; then
+            log "  WARNING: cannot read Package field from $name, will install anyway"
+            to_install+=("$deb")
+            continue
+        fi
+        cur="$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)"
+        if [ -n "$cur" ] && dpkg --compare-versions "$cur" ge "$ver" 2>/dev/null; then
+            log "  $pkg $cur already installed (>= $ver), skipping"
+        else
+            to_install+=("$deb")
+        fi
+    done
+    if [ "${#to_install[@]}" -gt 0 ]; then
+        names="$(for d in "${to_install[@]}"; do basename "$d"; done | tr '\n' ' ')"
+        log "  Installing ${#to_install[@]} deb(s): $names"
+        if dpkg -i "${to_install[@]}"; then
+            log "  Extra debs installed"
+        else
+            rc=$?
+            log "  WARNING: dpkg -i exited with $rc (unmet external deps are non-fatal)"
+        fi
+    else
+        log "  All extra debs already installed, nothing to do"
+    fi
+else
+    log "  No extra debs staged"
+fi
+
 uicache -a 2>/dev/null || true
 log "  uicache refreshed"
 
@@ -182,19 +244,23 @@ log "  apt upgrade done"
 
 # ═══════════ 7/7 INSTALL TROLLSTORE LITE ═════════════════════
 log "[7/8] Installing TrollStore Lite..."
+TROLLSTORE_READY=0
 if dpkg -s com.opa334.trollstorelite >/dev/null 2>&1; then
     log "  TrollStore Lite already installed"
+    TROLLSTORE_READY=1
 else
     apt-get -o APT::Get::AllowUnauthenticated=true \
         install -y -qq com.opa334.trollstorelite 2>&1
     trollstore_rc=$?
     if [ "$trollstore_rc" -ne 0 ]; then
-        die "TrollStore Lite apt install failed with exit code $trollstore_rc"
-    fi
-    if dpkg -s com.opa334.trollstorelite >/dev/null 2>&1; then
-        log "  TrollStore Lite installed"
+        log "  WARNING: TrollStore Lite apt install failed with exit code $trollstore_rc"
     else
-        die "TrollStore Lite install completed without registering package"
+        if dpkg -s com.opa334.trollstorelite >/dev/null 2>&1; then
+            log "  TrollStore Lite installed"
+            TROLLSTORE_READY=1
+        else
+            log "  WARNING: TrollStore Lite install completed without registering package"
+        fi
     fi
 fi
 
@@ -216,5 +282,9 @@ for profile in /var/root/.bashrc /var/root/.bash_profile; do
 done
 
 # ═══════════ DONE ════════════════════════════════════════════
-: > "$DONE_MARKER"
-log "=== vphone_jb_setup.sh complete ==="
+if [ "$TROLLSTORE_READY" = "1" ]; then
+    : > "$DONE_MARKER"
+    log "=== vphone_jb_setup.sh complete ==="
+else
+    log "=== vphone_jb_setup.sh core steps complete; TrollStore Lite still pending, marker not written ==="
+fi

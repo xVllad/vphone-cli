@@ -37,6 +37,7 @@
 #import "vphoned_protocol.h"
 #import "vphoned_settings.h"
 #import "vphoned_url.h"
+#import "vphoned_vcam.h"
 
 #ifndef AF_VSOCK
 #define AF_VSOCK 40
@@ -200,6 +201,14 @@ static NSDictionary *handle_command(NSDictionary *msg) {
     return vp_make_response(@"ok", reqId);
   }
 
+  if ([type isEqualToString:@"touch"]) {
+    int phase = [msg[@"phase"] intValue];
+    double x = [msg[@"x"] doubleValue];
+    double y = [msg[@"y"] doubleValue];
+    vp_hid_touch(phase, x, y);
+    return vp_make_response(@"ok", reqId);
+  }
+
   if ([type isEqualToString:@"devmode"]) {
     if (!vp_devmode_available()) {
       NSMutableDictionary *r = vp_make_response(@"err", reqId);
@@ -330,6 +339,7 @@ static BOOL handle_client(int fd) {
       [caps addObject:@"apps"];
     [caps addObject:@"url"];
     [caps addObject:@"settings"];
+    [caps addObject:@"touch"];
 
     NSMutableDictionary *helloResp = [@{
       @"v" : @PROTOCOL_VERSION,
@@ -337,6 +347,11 @@ static BOOL handle_client(int fd) {
       @"name" : @"vphoned",
       @"caps" : caps,
     } mutableCopy];
+    NSOperatingSystemVersion osv =
+        [[NSProcessInfo processInfo] operatingSystemVersion];
+    helloResp[@"ios"] =
+        [NSString stringWithFormat:@"%ld.%ld.%ld", (long)osv.majorVersion,
+                                   (long)osv.minorVersion, (long)osv.patchVersion];
     NSString *ip = primary_ipv4_address();
     if (ip)
       helloResp[@"ip"] = ip;
@@ -479,6 +494,7 @@ int main(int argc, char *argv[]) {
 
     gClipboardAvailable = vp_clipboard_load();
     gAppsAvailable = vp_apps_load();
+    vp_vcam_start();
 
     int sock = socket(AF_VSOCK, SOCK_STREAM, 0);
     if (sock < 0) {

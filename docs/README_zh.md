@@ -8,12 +8,20 @@
 
 ## 测试环境
 
-| 主机          | iPhone 系统           | CloudOS       |
-| ------------- | --------------------- | ------------- |
-| Mac16,12 26.3 | `17,3_26.1_23B85`     | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.3-23D128` |
-| Mac16,12 26.3 | `17,3_26.3.1_23D8133` | `26.3-23D128` |
+| 主机          | iPhone 系统           | CloudOS         |
+| --------------- | --------------------- | --------------- |
+| Mac16,11 27.0b2 | `17,3_18.6.2_22G100`  | `26.1-23B85`    |
+| Mac16,8 26.5.1  | `17,3_26.0_23A341`    | `26.1-23B85`    |
+| Mac16,8 26.5.1  | `17,3_26.0.1_23A355`  | `26.1-23B85`    |
+| Mac16,12 26.3   | `17,3_26.1_23B85`     | `26.1-23B85`    |
+| Mac16,12 26.3   | `17,3_26.3_23D127`    | `26.1-23B85`    |
+| Mac16,12 26.3   | `17,3_26.3_23D127`    | `26.3-23D128`   |
+| Mac16,12 26.3   | `17,3_26.3.1_23D8133` | `26.3-23D128`   |
+| Mac16,11 26.2   | `17,3_26.4_23E246`    | `26.4-23E5207q` |
+| Mac16,11 26.2   | `17,3_26.5_23F77`     | `26.4-23E5207q` |
+| Mac16,11 27.0b2 | `17,3_26.5.2_23F84`   | `26.4-23E5207q` |
+
+**注意：** iOS 18.x 上 Metal/GPU 加速无法工作——18.x 的 Metal/IOGPU 框架缺少半虚拟化 GPU 实现，因此由 Metal 渲染的内容（网页、图片、壁纸）无法显示。触摸、网络和应用可正常使用。
 
 ## 固件变体
 
@@ -21,10 +29,10 @@
 
 | 变体           | 启动链           | 自定义固件 | Make 目标                                   |
 | -------------- | :--------------: | :--------: | ------------------------------------------- |
-| **Patchless**  | 3 个补丁         | 2 个阶段   | `fw_patch_less` + `boot_less`              |
-| **常规版**     | 41 个补丁        | 10 个阶段  | `fw_patch` + `cfw_install`                  |
-| **开发版**     | 52 个补丁        | 12 个阶段  | `fw_patch_dev` + `cfw_install_dev`          |
-| **越狱版**     | 112 个补丁       | 14 个阶段  | `fw_patch_jb` + `cfw_install_jb`            |
+| **Patchless**  | 4 个补丁         | 2 个阶段   | `fw_patch_less` + `boot_less`              |
+| **常规版**     | 42 个补丁        | 10 个阶段  | `fw_patch` + `cfw_install`                  |
+| **开发版**     | 53 个补丁        | 12 个阶段  | `fw_patch_dev` + `cfw_install_dev`          |
+| **越狱版**     | 113 个补丁       | 14 个阶段  | `fw_patch_jb` + `cfw_install_jb`            |
 | **实验版**     | 越狱 + EXP 专属  | 越狱 + EXP | `fw_patch_exp` + `cfw_install_exp`          |
 
 > 越狱最终配置（符号链接、Sileo、apt、TrollStore）通过 `/cores/vphone_jb_setup.sh` LaunchDaemon 在首次启动时自动运行。查看进度：`/var/log/vphone_jb_setup.log`。
@@ -101,8 +109,8 @@ git clone --recurse-submodules https://github.com/Lakr233/vphone-cli.git
 ## 快速开始
 
 ```bash
-make setup_machine            # 完全自动化完成"首次启动"流程（包含 restore/ramdisk/CFW）
-# 选项：NONE_INTERACTIVE=1 SUDO_PASSWORD=...
+make setup_machine            # 完全自动化完成"首次启动"流程（包含 restore/CFW）
+# 选项：NON_INTERACTIVE=1 SUDO_PASSWORD=...
 # LESS=1 patchless 变体（- AMFI、SSV、Img4、TXM 绕过）
 # DEV=1 开发变体（+ TXM 权限/调试绕过）
 # JB=1 越狱变体（dev + 完整安全绕过）
@@ -168,29 +176,12 @@ make restore                  # 通过 pymobiledevice3 restore 后端刷写固�
 
 ## 安装自定义固件
 
-在终端 1 中停止 DFU 引导（Ctrl+C），然后再次进入 DFU，用于 ramdisk：
+恢复完成后，在终端 1 中停止 DFU 引导（Ctrl+C），使 VM 完全关机。安装程序会在主机上挂载 VM 的 `Disk.img`，放置所有 CFW 文件，并离线切换启动快照（无需 DFU / ramdisk / SSH），因此需要对磁盘的独占访问。
 
 ```bash
-# 终端 1
-make boot_dfu                 # 保持运行
-```
-
-```bash
-# 终端 2
-sudo make ramdisk_build       # 构建签名的 SSH ramdisk
-make ramdisk_send             # 发送到设备
-```
-
-当 ramdisk 运行后（输出中应显示 `Running server`），打开**第三个终端**运行 usbmux 隧道，然后在终端 2 安装 CFW：
-
-```bash
-# 终端 3 —— 保持运行
-python3 -m pymobiledevice3 usbmux forward 2222 22
-```
-
-```bash
-# 终端 2
+# 终端 2（会自动通过 sudo 重新执行）
 make cfw_install
+# 或：make cfw_install_dev       # 开发变体
 # 或：make cfw_install_jb        # 越狱变体
 # 或：make cfw_install_exp       # 实验变体（越狱 + 研究补丁栈）
 # 或：SPOOF_BUILD=23F77 make cfw_install_exp   # 同时改写 ProductBuildVersion
@@ -198,7 +189,7 @@ make cfw_install
 
 ## 首次启动
 
-在终端 1 中停止 DFU 引导（Ctrl+C），然后：
+停止 DFU 引导并完成 CFW 安装后，正常启动 VM：
 
 ```bash
 make boot
